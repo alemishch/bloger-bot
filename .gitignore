@@ -5,7 +5,7 @@ __pycache__/
 *$py.class
 *.so
 .python-version
-
+.vscode*
 # Virtual environments
 venv/
 env/
@@ -15,7 +15,7 @@ venv.bak/
 .venv/
 virtualenv/
 pip-wheel-metadata/
-
+*.session
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

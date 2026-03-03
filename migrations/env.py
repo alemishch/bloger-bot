@@ -9,10 +9,9 @@ from alembic import context
 from common.config import DatabaseSettings
 from common.models.base import Base
 
-# Import all your models here so Alembic can discover them
-import common.models.content
-import common.models.user
-# ...
+# Import ALL models so Alembic discovers them
+import common.models.content  # noqa: F401
+import common.models.user  # noqa: F401
 
 config = context.config
 
@@ -20,6 +19,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
 
 def run_migrations_offline() -> None:
     db_settings = DatabaseSettings()
@@ -32,10 +32,12 @@ def run_migrations_offline() -> None:
     with context.begin_transaction():
         context.run_migrations()
 
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
         context.run_migrations()
+
 
 async def run_async_migrations() -> None:
     db_settings = DatabaseSettings()
@@ -53,8 +55,10 @@ async def run_async_migrations() -> None:
 
     await connectable.dispose()
 
+
 def run_migrations_online() -> None:
     asyncio.run(run_async_migrations())
+
 
 if context.is_offline_mode():
     run_migrations_offline()

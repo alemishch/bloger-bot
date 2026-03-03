@@ -7,14 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install common lib first
 COPY libs/common/pyproject.toml libs/common/
 COPY libs/common/src/ libs/common/src/
 RUN pip install --no-cache-dir ./libs/common
 
-# Install service
-COPY services/ingestion-service/pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY services/ingestion-service/pyproject.toml services/ingestion-service/
+RUN pip install --no-cache-dir ./services/ingestion-service
 
 COPY services/ingestion-service/src/ src/
 

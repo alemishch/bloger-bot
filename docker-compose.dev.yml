@@ -6,9 +6,10 @@ x-common-env: &common-env
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
   REDIS_HOST: redis
   REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
   CHROMA_HOST: chromadb
   CHROMA_PORT: "8000"
-  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   ENVIRONMENT: ${ENVIRONMENT:-development}
   LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
 
@@ -23,7 +24,6 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infrastructure/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bloger_bot}"]
       interval: 10s
@@ -53,7 +53,6 @@ services:
       - IS_PERSISTENT=TRUE
       - ANONYMIZED_TELEMETRY=FALSE
 
-  # ── Application Services ──
   ingestion-service:
     build:
       context: .
@@ -62,21 +61,22 @@ services:
       <<: *common-env
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/2
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
+      TELEGRAM_SOURCE_CHANNELS: ${TELEGRAM_SOURCE_CHANNELS:-}
+      SESSIONS_DIR: /app/sessions
     ports:
       - "${INGESTION_SERVICE_PORT:-8002}:8000"
     volumes:
       - ./data:/app/data
+      - ./sessions:/app/sessions      
       - ./services/ingestion-service/src:/app/src
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      chromadb:
-        condition: service_started
 
   ingestion-worker:
     build:
@@ -87,60 +87,21 @@ services:
       <<: *common-env
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/2
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
+      TELEGRAM_SOURCE_CHANNELS: ${TELEGRAM_SOURCE_CHANNELS:-}
+      SESSIONS_DIR: /app/sessions
     volumes:
       - ./data:/app/data
+      - ./sessions:/app/sessions
       - ./services/ingestion-service/src:/app/src
     depends_on:
       redis:
         condition: service_healthy
-
-  content-service:
-    build:
-      context: .
-      dockerfile: services/content-service/Dockerfile
-    environment:
-      <<: *common-env
-    ports:
-      - "${CONTENT_SERVICE_PORT:-8001}:8000"
-    volumes:
-      - ./services/content-service/src:/app/src
-    depends_on:
-      postgres:
-        condition: service_healthy
-      chromadb:
-        condition: service_started
-
-  llm-service:
-    build:
-      context: .
-      dockerfile: services/llm-service/Dockerfile
-    environment:
-      <<: *common-env
-    ports:
-      - "${LLM_SERVICE_PORT:-8003}:8000"
-    volumes:
-      - ./services/llm-service/src:/app/src
-    depends_on:
-      chromadb:
-        condition: service_started
-
-  user-service:
-    build:
-      context: .
-      dockerfile: services/user-service/Dockerfile
-    environment:
-      <<: *common-env
-    ports:
-      - "${USER_SERVICE_PORT:-8004}:8000"
-    volumes:
-      - ./services/user-service/src:/app/src
-    depends_on:
       postgres:
         condition: service_healthy
 
-  # ── Monitoring ──
   prometheus:
     image: prom/prometheus:v2.53.0
     ports:
@@ -157,7 +118,6 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./infrastructure/docker/grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - prometheus
 
