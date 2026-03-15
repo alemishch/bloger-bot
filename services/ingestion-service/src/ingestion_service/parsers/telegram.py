@@ -3,7 +3,6 @@ import structlog
 from typing import Optional, AsyncIterator
 from pyrogram import Client
 from pyrogram.types import Message
-from pyrogram.enums import MessageMediaType
 
 from ingestion_service.config import settings
 from ingestion_service.parsers.base import BaseParser, ParsedItem
@@ -12,40 +11,55 @@ logger = structlog.get_logger()
 
 
 class TelegramChatParser(BaseParser):
-    """
-    Parses a private Telegram chat (group or channel) using a user account
-    via Pyrogram MTProto client.
-
-    Works with:
-    - Private groups you're a member of
-    - Private channels you're subscribed to
-    - Any chat ID (negative for groups, positive for users/channels)
-    """
 
     def __init__(self, chat_id: str | int, download_dir: str):
-        # chat_id can be "@username", numeric ID, or "me"
         self.chat_id = int(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
         self.download_dir = download_dir
         self.client: Optional[Client] = None
 
     async def connect(self) -> None:
-        session_path = os.path.join(
-            os.path.dirname(settings.TELEGRAM_SESSION_FILE),
-            os.path.splitext(os.path.basename(settings.TELEGRAM_SESSION_FILE))[0],
+        sessions_dir = settings.SESSIONS_DIR
+        session_name = settings.TELEGRAM_SESSION_NAME
+
+        # Pyrogram looks for: {workdir}/{name}.session
+        expected_path = os.path.join(sessions_dir, f"{session_name}.session")
+
+        logger.info(
+            "telegram_connect_attempt",
+            sessions_dir=sessions_dir,
+            session_name=session_name,
+            expected_path=expected_path,
+            exists=os.path.exists(expected_path),
+            dir_contents=os.listdir(sessions_dir) if os.path.exists(sessions_dir) else "DIR_NOT_FOUND",
         )
+
+        if not os.path.exists(expected_path):
+            raise RuntimeError(
+                f"Session file not found: {expected_path}\n"
+                f"Sessions dir contents: {os.listdir(sessions_dir) if os.path.exists(sessions_dir) else 'directory does not exist'}\n"
+                f"Create it with: python tools/create_session.py\n"
+                f"Then ensure it's at: sessions/{session_name}.session"
+            )
+
         self.client = Client(
-            name=session_path,
-            api_id=settings.TELEGRAM_API_ID,
+            name=session_name,
+            api_id=int(settings.TELEGRAM_API_ID),
             api_hash=settings.TELEGRAM_API_HASH,
-            no_updates=True,  # we don't need live updates, only historical
+            workdir=sessions_dir,
+            # CRITICAL: prevent interactive login prompt in non-interactive environments
+            in_memory=False,
+            no_updates=True,
         )
         await self.client.start()
         me = await self.client.get_me()
-        logger.info("pyrogram_connected", user=me.username, chat=self.chat_id)
+        logger.info("pyrogram_connected", user=me.username, chat_id=self.chat_id)
 
     async def disconnect(self) -> None:
         if self.client:
-            await self.client.stop()
+            try:
+                await self.client.stop()
+            except Exception:
+                pass
             self.client = None
 
     async def parse(
@@ -56,24 +70,25 @@ class TelegramChatParser(BaseParser):
         if not self.client:
             raise RuntimeError("Client not connected. Call connect() first.")
 
-        offset_id = 0  # 0 = start from newest
-        fetch_limit = limit or 200
-
-        # Pyrogram iter_messages goes newest→oldest by default
-        # We use reverse=True to go oldest→newest, offset_id to skip already seen
-        kwargs: dict = {
+        kwargs = {
             "chat_id": self.chat_id,
-            "limit": fetch_limit,
-            "reverse": True,  # oldest first → good for incremental
+            "limit": limit or 500,
         }
-        if since_message_id:
-            kwargs["offset_id"] = since_message_id
+        # offset_id: Pyrogram returns messages with ID < offset_id
+        # So to get messages AFTER since_message_id, we DON'T use offset_id —
+        # we fetch all and filter. For large chats, use offset_id=0 (latest).
+        # For incremental: fetch newest batch, yield only those newer than last seen.
+        
+        messages = []
+        async for message in self.client.get_chat_history(**kwargs):
+            # get_chat_history goes newest → oldest
+            # Stop early if we've already seen this message
+            if since_message_id and message.id <= since_message_id:
+                break
+            messages.append(message)
 
-        async for message in self.client.get_chat_history(**{
-            "chat_id": self.chat_id,
-            "limit": fetch_limit,
-            "offset_id": since_message_id or 0,
-        }):
+        # Yield oldest → newest (correct chronological order for pipeline)
+        for message in reversed(messages):
             item = self._message_to_parsed_item(message)
             if item:
                 yield item
@@ -91,11 +106,12 @@ class TelegramChatParser(BaseParser):
             },
         )
 
-        if message.text and not message.media:
-            item.content_type = "post"
-            return item
+        if not message.media:
+            if message.text:
+                item.content_type = "post"
+                return item
+            return None  # skip empty
 
-        # ── Video ──
         if message.video:
             v = message.video
             item.content_type = "video"
@@ -106,7 +122,6 @@ class TelegramChatParser(BaseParser):
             item.raw_metadata["file_id"] = v.file_id
             return item
 
-        # ── Video Note (round video) ──
         if message.video_note:
             vn = message.video_note
             item.content_type = "video"
@@ -117,7 +132,6 @@ class TelegramChatParser(BaseParser):
             item.raw_metadata["is_video_note"] = True
             return item
 
-        # ── Audio ──
         if message.audio:
             a = message.audio
             item.content_type = "audio"
@@ -128,7 +142,6 @@ class TelegramChatParser(BaseParser):
             item.raw_metadata["file_id"] = a.file_id
             return item
 
-        # ── Voice Message ──
         if message.voice:
             vc = message.voice
             item.content_type = "audio"
@@ -139,7 +152,6 @@ class TelegramChatParser(BaseParser):
             item.raw_metadata["is_voice"] = True
             return item
 
-        # ── Document (could be video sent as file) ──
         if message.document:
             doc = message.document
             mime = doc.mime_type or ""
@@ -150,7 +162,7 @@ class TelegramChatParser(BaseParser):
                 item.title = doc.file_name
                 item.raw_metadata["file_id"] = doc.file_id
                 return item
-            elif mime.startswith("audio/"):
+            if mime.startswith("audio/"):
                 item.content_type = "audio"
                 item.media_type = mime
                 item.file_size_bytes = doc.file_size
@@ -158,7 +170,6 @@ class TelegramChatParser(BaseParser):
                 item.raw_metadata["file_id"] = doc.file_id
                 return item
 
-        # Skip photos, stickers, etc.
         return None
 
     async def download_media(self, item: ParsedItem, output_dir: str) -> str:
@@ -168,28 +179,23 @@ class TelegramChatParser(BaseParser):
             raise ValueError("source_message_id is required for download")
 
         os.makedirs(output_dir, exist_ok=True)
-
-        # Determine extension from mime type
         ext = _mime_to_ext(item.media_type or "")
         filename = f"msg_{item.source_message_id}{ext}"
         filepath = os.path.join(output_dir, filename)
 
-        # Skip if already downloaded
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             logger.info("download_skipped_exists", path=filepath)
             return filepath
 
         logger.info("downloading", message_id=item.source_message_id, chat=self.chat_id)
-
         message = await self.client.get_messages(self.chat_id, item.source_message_id)
         await self.client.download_media(message, file_name=filepath)
-
         logger.info("download_done", path=filepath, size=os.path.getsize(filepath))
         return filepath
 
 
 def _mime_to_ext(mime_type: str) -> str:
-    mapping = {
+    return {
         "video/mp4": ".mp4",
         "video/x-matroska": ".mkv",
         "video/webm": ".webm",
@@ -200,5 +206,4 @@ def _mime_to_ext(mime_type: str) -> str:
         "audio/wav": ".wav",
         "audio/mp4": ".m4a",
         "audio/x-m4a": ".m4a",
-    }
-    return mapping.get(mime_type, ".mp4")  # default to mp4 for unknown video
+    }.get(mime_type, ".mp4")

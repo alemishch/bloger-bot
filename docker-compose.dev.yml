@@ -9,9 +9,24 @@ x-common-env: &common-env
   REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
   CHROMA_HOST: chromadb
   CHROMA_PORT: "8000"
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
   ENVIRONMENT: ${ENVIRONMENT:-development}
   LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
+
+x-worker-env: &worker-env
+  <<: *common-env
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/2
+  TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
+  TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+  TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
+  SESSIONS_DIR: /app/sessions
+  AUDIO_DIR: /app/data/audio
+
+x-worker-volumes: &worker-volumes
+  - ./data:/app/data
+  - ./sessions:/app/sessions
+  - ./services/ingestion-service/src:/app/src
 
 services:
   postgres:
@@ -58,44 +73,55 @@ services:
       context: .
       dockerfile: services/ingestion-service/Dockerfile
     environment:
-      <<: *common-env
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/2
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
-      TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
-      TELEGRAM_SOURCE_CHANNELS: ${TELEGRAM_SOURCE_CHANNELS:-}
-      SESSIONS_DIR: /app/sessions
+      <<: *worker-env
     ports:
       - "${INGESTION_SERVICE_PORT:-8002}:8000"
-    volumes:
-      - ./data:/app/data
-      - ./sessions:/app/sessions      
-      - ./services/ingestion-service/src:/app/src
+    volumes: *worker-volumes
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
 
+  # concurrency=2: parse tasks, label, vectorize
   ingestion-worker:
     build:
       context: .
       dockerfile: services/ingestion-service/Dockerfile
-    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=2 --queues=default --hostname=parse-worker@%h
     environment:
-      <<: *common-env
-      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/1
-      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/2
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
-      TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
-      TELEGRAM_SOURCE_CHANNELS: ${TELEGRAM_SOURCE_CHANNELS:-}
-      SESSIONS_DIR: /app/sessions
-    volumes:
-      - ./data:/app/data
-      - ./sessions:/app/sessions
-      - ./services/ingestion-service/src:/app/src
+      <<: *worker-env
+    volumes: *worker-volumes
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # concurrency=1: one Pyrogram client, sequential downloads
+  ingestion-download-worker:
+    build:
+      context: .
+      dockerfile: services/ingestion-service/Dockerfile
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=1 --queues=downloads --hostname=download-worker@%h
+    environment:
+      <<: *worker-env
+    volumes: *worker-volumes
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # concurrency=3: convert+transcribe (mostly waiting on OpenAI API)
+  ingestion-transcription-worker:
+    build:
+      context: .
+      dockerfile: services/ingestion-service/Dockerfile
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=3 --queues=transcriptions --hostname=transcription-worker@%h
+    environment:
+      <<: *worker-env
+    volumes: *worker-volumes
     depends_on:
       redis:
         condition: service_healthy
@@ -104,6 +130,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.0
+    profiles: [monitoring]
     ports:
       - "9090:9090"
     volumes:
@@ -112,14 +139,13 @@ services:
 
   grafana:
     image: grafana/grafana:11.1.0
+    profiles: [monitoring]
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
       - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
 
 volumes:
   postgres_data:

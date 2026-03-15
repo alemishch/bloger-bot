@@ -1,4 +1,7 @@
-.PHONY: help up down build logs ps migrate migrate-create parse transcribe status
+.PHONY: help up down build logs ps migrate migrate-create migrate-down \
+		up-infra parse pipeline-stats list-items create-source \
+		transcriber-install transcribe-file transcribe-process transcribe-watch transcribe-status \
+		export-state export-state-to import-state db-dump db-restore health lint format
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -25,21 +28,45 @@ logs-worker: ## Follow ingestion worker logs
 ps: ## Show running services
 	docker compose -f docker-compose.dev.yml ps
 
-# ── Database ──
+# ── Database / Migrations ──
 migrate: ## Run database migrations
-	cd migrations && alembic upgrade head
+	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+		alembic -c /app/migrations/alembic.ini upgrade head
 
-migrate-create: ## Create a migration: make migrate-create MSG="add content tables"
-	cd migrations && alembic revision --autogenerate -m "$(MSG)"
+migrate-create: ## Create migration: make migrate-create MSG="add users table"
+	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+		alembic -c /app/migrations/alembic.ini revision --autogenerate -m "$(MSG)"
 
 migrate-down: ## Rollback last migration
-	cd migrations && alembic downgrade -1
+	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+		alembic -c /app/migrations/alembic.ini downgrade -1
+
+migrate-current: ## Show current migration state
+	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+		alembic -c /app/migrations/alembic.ini current
+
+migrate-history: ## Show migration history
+	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+		alembic -c /app/migrations/alembic.ini history
+
+
+db-dump: ## Quick DB dump to file
+	docker compose -f docker-compose.dev.yml exec postgres \
+		pg_dump -U $${POSTGRES_USER:-bloger_bot} $${POSTGRES_DB:-bloger_bot} \
+		> backup_$(shell powershell -Command "Get-Date -Format 'yyyyMMdd_HHmmss'").sql
+	@echo "✅ Dumped"
+
+db-restore: ## Restore DB: make db-restore FILE=backup.sql
+	docker compose -f docker-compose.dev.yml exec -T postgres \
+		psql -U $${POSTGRES_USER:-bloger_bot} $${POSTGRES_DB:-bloger_bot} < $(FILE)
+	@echo "✅ Restored from $(FILE)"
 
 # ── Content Pipeline ──
-create-source: ## Create a source: make create-source NAME="Yuri Channel" CHANNEL="@yuri_channel" BLOGGER="yuri"
+create-source: ## make create-source NAME="Yuri Chat" CHANNEL="-100123" BLOGGER="yuri"
 	curl -s -X POST http://localhost:8002/api/v1/sources/ \
 		-H "Content-Type: application/json" \
-		-d '{"name":"$(NAME)","source_type":"telegram","blogger_id":"$(BLOGGER)","config":{"channel_id":"$(CHANNEL)"}}' | python -m json.tool
+		-d "{\"name\":\"$(NAME)\",\"source_type\":\"telegram\",\"blogger_id\":\"$(BLOGGER)\",\"config\":{\"channel_id\":\"$(CHANNEL)\"}}" \
+		| python -m json.tool
 
 parse: ## Trigger parsing: make parse SOURCE_ID=<uuid>
 	curl -s -X POST http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse | python -m json.tool
@@ -47,51 +74,71 @@ parse: ## Trigger parsing: make parse SOURCE_ID=<uuid>
 pipeline-stats: ## Show pipeline statistics
 	curl -s http://localhost:8002/api/v1/jobs/stats | python -m json.tool
 
-list-items: ## List content items: make list-items STATUS=downloaded
+list-items: ## List items: make list-items STATUS=downloaded
 	curl -s "http://localhost:8002/api/v1/jobs/?status=$(STATUS)&limit=20" | python -m json.tool
 
 # ── Transcriber (LOCAL) ──
-transcriber-install: ## Install transcriber tool locally
+transcriber-install: ## Install transcriber locally
 	cd tools/transcriber && pip install -e ".[dev]"
 
-transcribe-file: ## Transcribe a single file: make transcribe-file FILE=path/to/file.mp4
+transcribe-file: ## make transcribe-file FILE=path/to/file.mp4
 	transcriber transcribe $(FILE)
 
-transcribe-process: ## Process all downloaded items from DB
-	transcriber process --limit 10
+transcribe-process: ## Process downloaded items from DB
+	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(shell powershell -Command "(Get-Content .env | Select-String 'POSTGRES_PASSWORD').ToString().Split('=')[1]") transcriber process --limit 10
 
-transcribe-watch: ## Watch for new downloads and auto-transcribe
-	transcriber watch --interval 30
+transcribe-watch: ## Watch and auto-transcribe
+	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(shell powershell -Command "(Get-Content .env | Select-String 'POSTGRES_PASSWORD').ToString().Split('=')[1]") transcriber watch --interval 30
 
-transcribe-status: ## Show pipeline status
+transcribe-watch-windows: ## Watch and auto-transcribe (Windows PowerShell)
+	powershell -Command "Set-Item Env:POSTGRES_HOST 'localhost'; Set-Item Env:POSTGRES_PASSWORD '1122345'; transcriber watch --interval 30"
+	
+transcribe-status: ## Show pipeline status via API
 	transcriber status
 
-# ── Development ──
+reset-failed-transcriptions: ## Reset failed transcriptions back to downloaded
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-failed?status=transcription_failed" | python -m json.tool
+
+queue-downloads: ## Queue all discovered items for download
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-discovered?limit=500" | python -m json.tool
+
+queue-labeling: ## Queue all transcribed items for labeling  
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-transcribed?limit=500" | python -m json.tool
+
+# ── Sync (USB / multi-laptop) ──
+export-state: ## Export state to ./sync_export
+	python tools/sync/export_state.py --output ./sync_export
+
+export-state-to: ## make export-state-to PATH=E:/bloger-sync
+	python tools/sync/export_state.py --output $(PATH)
+
+import-state: ## make import-state PATH=E:/bloger-sync
+	python tools/sync/import_state.py --input $(PATH)
+
+# ── Dev ──
+health: ## Check service health
+	@curl -sf http://localhost:8002/health && echo " ✅ ingestion-service OK" || echo " ❌ ingestion-service DOWN"
+
 lint: ## Run linter
 	ruff check .
 
 format: ## Format code
 	ruff format .
 
-health: ## Check all service health
-	@echo "Ingestion: $$(curl -s http://localhost:8002/health | python -m json.tool 2>/dev/null || echo 'DOWN')"
+queue-transcriptions: ## Queue all downloaded items for conversion+transcription
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-downloaded?limit=500" | python -m json.tool
 
-# ── Sync (USB / multi-laptop) ──
-export-state: ## Export DB + sessions + transcriptions for USB transfer
-	python tools/sync/export_state.py --output ./sync_export
+retry-failed: ## Retry all download_failed items
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-failed-downloads?limit=500" | python -m json.tool
 
-export-state-to: ## Export to specific path: make export-state-to PATH=/e/bloger-sync
-	python tools/sync/export_state.py --output $(PATH)
+logs-transcription-worker: ## Follow transcription worker logs
+	docker compose -f docker-compose.dev.yml logs -f ingestion-transcription-worker
 
-import-state: ## Import from USB: make import-state PATH=/e/bloger-sync
-	python tools/sync/import_state.py --input $(PATH)
+stats-watch: ## Watch pipeline stats every 15s (Windows PowerShell)
+	powershell -Command "while(1) { Clear-Host; Write-Host (Get-Date); curl.exe -s http://localhost:8002/api/v1/jobs/stats | python -m json.tool; Start-Sleep 15 }"
 
-db-dump: ## Quick DB dump to file
-	docker compose -f docker-compose.dev.yml exec -T postgres \
-		pg_dump -U bloger_bot bloger_bot > backup_$(shell date +%Y%m%d_%H%M%S).sql
-	@echo "✅ Dumped to backup_*.sql"
+retry-failed-transcriptions: ## Retry transcription_failed (re-download corrupt + re-convert others)
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-failed-transcriptions" | python -m json.tool
 
-db-restore: ## Restore DB from file: make db-restore FILE=backup_20241201.sql
-	docker compose -f docker-compose.dev.yml exec -T postgres \
-		psql -U bloger_bot bloger_bot < $(FILE)
-	@echo "✅ Restored from $(FILE)"
+retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-stuck-chunking" | python -m json.tool

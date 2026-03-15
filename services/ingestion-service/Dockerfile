@@ -14,9 +14,13 @@ RUN pip install --no-cache-dir ./libs/common
 COPY services/ingestion-service/pyproject.toml services/ingestion-service/
 RUN pip install --no-cache-dir ./services/ingestion-service
 
-COPY services/ingestion-service/src/ src/
+RUN pip install --no-cache-dir alembic
 
-ENV PYTHONPATH=/app/src
+COPY services/ingestion-service/src/ src/
+COPY migrations/ migrations/
+RUN mkdir -p migrations/versions
+
+ENV PYTHONPATH=/app/src:/app/libs/common/src
 EXPOSE 8000
 
 CMD ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

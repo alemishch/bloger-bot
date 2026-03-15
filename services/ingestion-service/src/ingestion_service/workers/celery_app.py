@@ -16,8 +16,16 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    task_soft_time_limit=3600,
-    task_time_limit=7200,
+    task_soft_time_limit=7200,
+    task_time_limit=10800,
+    task_routes={
+        "download_media_batch": {"queue": "downloads"},
+        "download_media": {"queue": "downloads"},
+        "parse_telegram_channel": {"queue": "default"},
+        "convert_and_transcribe": {"queue": "transcriptions"},
+        "label_item": {"queue": "default"},
+        "vectorize_item": {"queue": "default"},
+    },
 )
 
 celery_app.autodiscover_tasks(["ingestion_service.workers"])

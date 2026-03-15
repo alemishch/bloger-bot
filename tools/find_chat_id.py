@@ -15,7 +15,7 @@ load_dotenv()
 
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
-SESSION_NAME = "finder_session"
+SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "content_parser")
 
 
 async def main():

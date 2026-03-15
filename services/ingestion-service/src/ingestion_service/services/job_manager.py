@@ -2,7 +2,7 @@ import uuid
 import structlog
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.content import ContentSource, ContentItem
@@ -17,19 +17,8 @@ class JobManager:
 
     # ── Sources ──
 
-    async def create_source(
-        self,
-        name: str,
-        source_type: SourceType,
-        blogger_id: BloggerID,
-        config: dict,
-    ) -> ContentSource:
-        source = ContentSource(
-            name=name,
-            source_type=source_type,
-            blogger_id=blogger_id,
-            config=config,
-        )
+    async def create_source(self, name: str, source_type: SourceType, blogger_id: BloggerID, config: dict) -> ContentSource:
+        source = ContentSource(name=name, source_type=source_type, blogger_id=blogger_id, config=config)
         self.session.add(source)
         await self.session.commit()
         await self.session.refresh(source)
@@ -56,15 +45,7 @@ class JobManager:
 
     # ── Content Items ──
 
-    async def upsert_content_item(
-        self,
-        source_id: uuid.UUID,
-        source_message_id: int,
-        content_type: ContentType,
-        blogger_id: BloggerID,
-        **kwargs,
-    ) -> ContentItem:
-        # Check if already exists (deduplication)
+    async def upsert_content_item(self, source_id: uuid.UUID, source_message_id: int, content_type: ContentType, blogger_id: BloggerID, **kwargs) -> ContentItem:
         q = select(ContentItem).where(
             ContentItem.source_id == source_id,
             ContentItem.source_message_id == source_message_id,
@@ -90,18 +71,11 @@ class JobManager:
         logger.info("content_item_created", item_id=str(item.id), message_id=source_message_id)
         return item
 
-    async def update_item_status(
-        self,
-        item_id: uuid.UUID,
-        status: JobStatus,
-        error_message: Optional[str] = None,
-        **extra_fields,
-    ):
+    async def update_item_status(self, item_id: uuid.UUID, status: JobStatus, error_message: Optional[str] = None, **extra_fields):
         values = {"status": status, "updated_at": datetime.utcnow()}
         if error_message:
             values["error_message"] = error_message
         values.update(extra_fields)
-
         await self.session.execute(
             update(ContentItem).where(ContentItem.id == item_id).values(**values)
         )
@@ -121,10 +95,21 @@ class JobManager:
         return await self.session.get(ContentItem, item_id)
 
     async def get_pipeline_stats(self) -> dict:
-        """Return count of items in each status for monitoring."""
-        stats = {}
-        for status in JobStatus:
-            q = select(ContentItem).where(ContentItem.status == status)
-            result = await self.session.execute(q)
-            stats[status.value] = len(result.scalars().all())
+        """Single-query aggregation using raw SQL to avoid enum deserialization errors."""
+        from sqlalchemy import text
+
+        # Initialize all statuses to 0
+        stats = {s.value: 0 for s in JobStatus}
+
+        # Use raw SQL with ::text cast — bypasses SQLAlchemy enum deserialization entirely
+        result = await self.session.execute(
+            text("SELECT status::text, COUNT(id) AS cnt FROM content_items GROUP BY status")
+        )
+        for row in result.fetchall():
+            key = row[0].lower()  # normalize to lowercase just in case
+            if key in stats:
+                stats[key] = row[1]
+            else:
+                stats[key] = row[1]  # include unknown values too
+
         return stats
