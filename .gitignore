@@ -360,6 +360,9 @@ storybook-static/
 # 📦 PROJECT-SPECIFIC
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# Google Drive sync staging (tools/sync)
+.drive_sync_staging/
+
 # Logs
 logs/
 *.log

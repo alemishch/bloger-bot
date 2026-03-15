@@ -1,0 +1,24 @@
+{
+  "comment": "Paths to sync to Google Drive (gitignored / runtime data). All paths relative to repo root.",
+  "remote_name": "gdrive",
+  "remote_folder": "bloger-bot-sync",
+  "paths": [
+    "sessions",
+    "data/transcriptions",
+    "data/labeled",
+    "data/downloads",
+    "data/audio",
+    "data/exports",
+    "data/rag",
+    "chroma_db",
+    "vector_store",
+    "chromadb",
+    "qdrant_storage"
+  ],
+  "session_files": [
+    "*.session",
+    "tools/*.session"
+  ],
+  "include_postgres_dump": true,
+  "exclude_env_and_secrets": true
+}
