@@ -1,0 +1,164 @@
+# Onboarding scenario for Yuri Kinash
+# To swap the scenario: edit this file and restart the bot. No code changes needed.
+
+steps:
+  - id: welcome
+    type: message
+    text: |
+      Привет, {name}! 👋
+
+      Я — цифровой помощник Юрия Кинаша, эксперта по психосоматике и работе с телом.
+
+      Я помогу тебе:
+      🔍 Разобраться в причинах хронических симптомов
+      📋 Пройти диагностику и получить карту проблемных зон
+      💡 Получить персональную стратегию восстановления
+      📚 Подобрать контент и материалы по твоей ситуации
+    next: legal
+
+  - id: legal
+    type: message
+    text: |
+      ⚠️ <b>Важная информация:</b>
+
+      Этот бот — НЕ медицинский инструмент. Он не ставит диагнозы и не заменяет консультацию врача или психотерапевта.
+
+      Информация основана на методологии Юрия Кинаша и носит ознакомительный характер.
+
+      Продолжая, ты принимаешь эти условия.
+    buttons:
+      - text: "✅ Понятно, продолжить"
+        value: "accepted"
+        next: symptoms
+    parse_mode: HTML
+
+  - id: symptoms
+    type: choice
+    question: |
+      Что тебя сейчас больше всего беспокоит? Выбери основную тему:
+    multiple: true
+    max_choices: 3
+    options:
+      - text: "😴 Хроническая усталость"
+        value: "fatigue"
+      - text: "💪 Боли (спина, суставы, голова)"
+        value: "pain"
+      - text: "🍽️ ЖКТ (желудок, кишечник)"
+        value: "gut"
+      - text: "😰 Тревога, стресс"
+        value: "anxiety"
+      - text: "😴 Проблемы со сном"
+        value: "sleep"
+      - text: "⚖️ Лишний вес"
+        value: "weight"
+      - text: "🤒 Частые болезни"
+        value: "immunity"
+      - text: "🔄 Другое"
+        value: "other"
+    next: duration
+
+  - id: duration
+    type: choice
+    question: |
+      Как давно тебя это беспокоит?
+    options:
+      - text: "Меньше месяца"
+        value: "less_month"
+      - text: "1-6 месяцев"
+        value: "1_6_months"
+      - text: "6-12 месяцев"
+        value: "6_12_months"
+      - text: "Больше года"
+        value: "over_year"
+      - text: "Больше 3 лет"
+        value: "over_3_years"
+    next: tried
+
+  - id: tried
+    type: choice
+    question: |
+      Что ты уже пробовал(а) для решения?
+    multiple: true
+    max_choices: 4
+    options:
+      - text: "👩‍⚕️ Врачи, обследования"
+        value: "doctors"
+      - text: "💊 Лекарства, БАДы"
+        value: "meds"
+      - text: "🧘 Психолог / психотерапевт"
+        value: "psychologist"
+      - text: "🏋️ Спорт, питание"
+        value: "fitness"
+      - text: "📚 Курсы, книги по теме"
+        value: "courses"
+      - text: "🙅 Ничего не пробовал(а)"
+        value: "nothing"
+    next: lifestyle
+
+  - id: lifestyle
+    type: choice
+    question: |
+      Какой у тебя сейчас ритм жизни?
+    options:
+      - text: "🏢 Работа + семья (мало времени на себя)"
+        value: "busy_family"
+      - text: "🏢 Работа (без семьи)"
+        value: "busy_work"
+      - text: "👶 Дома с детьми"
+        value: "home_kids"
+      - text: "⏰ Есть время для себя"
+        value: "free_time"
+    next: blocker
+
+  - id: blocker
+    type: choice
+    question: |
+      Что, как тебе кажется, больше всего мешает изменениям?
+    options:
+      - text: "⏰ Нет времени"
+        value: "no_time"
+      - text: "❓ Не знаю, с чего начать"
+        value: "dont_know"
+      - text: "😔 Нет мотивации / сил"
+        value: "no_motivation"
+      - text: "💰 Финансы"
+        value: "finances"
+      - text: "🤷 Не верю, что что-то поможет"
+        value: "no_faith"
+    next: expert_experience
+
+  - id: expert_experience
+    type: choice
+    question: |
+      Ты уже знаком(а) с материалами Юрия Кинаша?
+    options:
+      - text: "🆕 Нет, я тут впервые"
+        value: "new"
+      - text: "📺 Смотрел(а) видео/читал(а) посты"
+        value: "watched"
+      - text: "📖 Проходил(а) курс / программу"
+        value: "course_done"
+    next: complete
+
+  - id: complete
+    type: message
+    text: |
+      Спасибо, {name}! 🙏
+
+      Я получил(а) твои ответы. Вот что я могу предложить:
+
+      📋 Теперь ты можешь задать мне любой вопрос по здоровью и психосоматике — я подберу ответ из базы знаний Юрия.
+
+      🔍 В будущем здесь появится полная диагностика и персональная стратегия.
+
+      Просто напиши свой вопрос! 💬
+    finish: true
+
+lead_magnet:
+  fatigue: "Подборка: 3 материала от Юрия о борьбе с усталостью"
+  pain: "Подборка: как тело сигнализирует через боль"
+  gut: "Подборка: ЖКТ и психосоматика"
+  anxiety: "Подборка: тревога и её корни"
+  sleep: "Подборка: восстановление сна"
+  weight: "Подборка: лишний вес и эмоции"
+  default: "Подборка: с чего начать путь к здоровью"
