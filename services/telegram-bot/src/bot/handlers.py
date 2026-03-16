@@ -7,7 +7,10 @@ from aiogram.enums import ChatAction
 
 from bot.config import settings, load_blogger_config
 from bot.llm_client import ask_llm
-from bot.db import upsert_user, save_onboarding_response, update_onboarding_state, get_user_state
+from bot.db import (
+    upsert_user, save_onboarding_response, update_onboarding_state,
+    get_user_state, get_or_create_session, save_chat_message,
+)
 from bot.onboarding import (
     load_scenario, get_step, get_first_step_id,
     build_step_message, get_lead_magnet_text,
@@ -208,7 +211,7 @@ async def handle_text(message: Message):
         return
 
     user_state = await get_user_state(message.from_user.id)
-    if user_state and user_state.get("onboarding_status") == "in_progress":
+    if user_state and str(user_state.get("onboarding_status")) == "in_progress":
         await message.answer(
             "Сначала давай закончим знакомство! Нажми на одну из кнопок выше ☝️"
         )
@@ -218,12 +221,22 @@ async def handle_text(message: Message):
     thinking_msg = await message.answer("🔍 Изучаю вашу ситуацию…")
 
     try:
+        session_id = await get_or_create_session(message.from_user.id, settings.BLOGGER_ID)
+
+        if session_id and user_state:
+            await save_chat_message(user_state["id"], session_id, "user", query)
+
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         result = await ask_llm(query=query, blogger_id=settings.BLOGGER_ID)
         answer = result.get("answer", "Не удалось получить ответ.")
         if len(answer) > 4000:
             answer = answer[:4000] + "…"
         await thinking_msg.edit_text(answer)
+
+        if session_id and user_state:
+            token_count = result.get("usage", {}).get("completion_tokens")
+            await save_chat_message(user_state["id"], session_id, "assistant", answer, token_count)
+
         logger.info("question_answered",
                      telegram_id=message.from_user.id,
                      query_len=len(query), answer_len=len(answer))
