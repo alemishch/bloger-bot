@@ -39,23 +39,23 @@ ps: ## Show running services
 
 # ── Database / Migrations ──
 migrate: ## Run database migrations
-	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+	docker compose -f docker-compose.dev.yml exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini upgrade head
 
 migrate-create: ## Create migration: make migrate-create MSG="add users table"
-	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+	docker compose -f docker-compose.dev.yml exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini revision --autogenerate -m "$(MSG)"
 
 migrate-down: ## Rollback last migration
-	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+	docker compose -f docker-compose.dev.yml exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini downgrade -1
 
 migrate-current: ## Show current migration state
-	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+	docker compose -f docker-compose.dev.yml exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini current
 
 migrate-history: ## Show migration history
-	docker compose -f docker-compose.dev.yml --profile migrate run --rm migrate \
+	docker compose -f docker-compose.dev.yml exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini history
 
 
