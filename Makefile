@@ -3,6 +3,15 @@
 		transcriber-install transcribe-file transcribe-process transcribe-watch transcribe-status \
 		export-state export-state-to import-state db-dump db-restore health lint format
 
+# ── OS helpers ──
+ifeq ($(OS),Windows_NT)
+  _TIMESTAMP = $(shell powershell -Command "Get-Date -Format 'yyyyMMdd_HHmmss'")
+  _PG_PASSWORD = $(shell powershell -Command "(Get-Content .env | Select-String 'POSTGRES_PASSWORD').ToString().Split('=')[1]")
+else
+  _TIMESTAMP = $(shell date +%Y%m%d_%H%M%S)
+  _PG_PASSWORD = $(shell grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)
+endif
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
@@ -53,7 +62,7 @@ migrate-history: ## Show migration history
 db-dump: ## Quick DB dump to file
 	docker compose -f docker-compose.dev.yml exec postgres \
 		pg_dump -U $${POSTGRES_USER:-bloger_bot} $${POSTGRES_DB:-bloger_bot} \
-		> backup_$(shell powershell -Command "Get-Date -Format 'yyyyMMdd_HHmmss'").sql
+		> backup_$(_TIMESTAMP).sql
 	@echo "✅ Dumped"
 
 db-restore: ## Restore DB: make db-restore FILE=backup.sql
@@ -85,10 +94,10 @@ transcribe-file: ## make transcribe-file FILE=path/to/file.mp4
 	transcriber transcribe $(FILE)
 
 transcribe-process: ## Process downloaded items from DB
-	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(shell powershell -Command "(Get-Content .env | Select-String 'POSTGRES_PASSWORD').ToString().Split('=')[1]") transcriber process --limit 10
+	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(_PG_PASSWORD) transcriber process --limit 10
 
 transcribe-watch: ## Watch and auto-transcribe
-	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(shell powershell -Command "(Get-Content .env | Select-String 'POSTGRES_PASSWORD').ToString().Split('=')[1]") transcriber watch --interval 30
+	POSTGRES_HOST=localhost POSTGRES_PASSWORD=$(_PG_PASSWORD) transcriber watch --interval 30
 
 transcribe-watch-windows: ## Watch and auto-transcribe (Windows PowerShell)
 	powershell -Command "Set-Item Env:POSTGRES_HOST 'localhost'; Set-Item Env:POSTGRES_PASSWORD '1122345'; transcriber watch --interval 30"
@@ -134,11 +143,31 @@ retry-failed: ## Retry all download_failed items
 logs-transcription-worker: ## Follow transcription worker logs
 	docker compose -f docker-compose.dev.yml logs -f ingestion-transcription-worker
 
-stats-watch: ## Watch pipeline stats every 15s (Windows PowerShell)
+stats-watch: ## Watch pipeline stats every 15s
+ifeq ($(OS),Windows_NT)
 	powershell -Command "while(1) { Clear-Host; Write-Host (Get-Date); curl.exe -s http://localhost:8002/api/v1/jobs/stats | python -m json.tool; Start-Sleep 15 }"
+else
+	watch -n 15 'echo "--- $$(date) ---"; curl -s http://localhost:8002/api/v1/jobs/stats | python3 -m json.tool'
+endif
 
 retry-failed-transcriptions: ## Retry transcription_failed (re-download corrupt + re-convert others)
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-failed-transcriptions" | python -m json.tool
 
 retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-stuck-chunking" | python -m json.tool
+
+recover-all: ## Recover ALL stuck/failed items in one shot
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/recover-all" | python3 -m json.tool
+
+parse-text: ## Parse text posts: make parse-text SOURCE_ID=<uuid>
+	curl -s -X POST "http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse-text?max_messages=0" | python3 -m json.tool
+
+cancel-task: ## Cancel background task: make cancel-task TASK_ID=<id>
+	curl -s -X POST "http://localhost:8002/api/v1/sources/cancel-task/$(TASK_ID)" | python3 -m json.tool
+
+# ── Google Drive Sync ──
+sync-from-drive: ## Pull state from Google Drive
+	python tools/sync/sync_from_drive.py --yes-db
+
+sync-to-drive: ## Push state to Google Drive
+	python tools/sync/sync_to_drive.py

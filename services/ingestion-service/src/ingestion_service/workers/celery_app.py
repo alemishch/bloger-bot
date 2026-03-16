@@ -18,10 +18,12 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_soft_time_limit=7200,
     task_time_limit=10800,
+    task_default_queue="default",
     task_routes={
         "download_media_batch": {"queue": "downloads"},
         "download_media": {"queue": "downloads"},
         "parse_telegram_channel": {"queue": "default"},
+        "parse_channel_text": {"queue": "default"},
         "convert_and_transcribe": {"queue": "transcriptions"},
         "label_item": {"queue": "default"},
         "vectorize_item": {"queue": "default"},
