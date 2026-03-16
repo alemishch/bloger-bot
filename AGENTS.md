@@ -4,47 +4,85 @@
 
 ### Project overview
 
-Bloger Bot is a content ingestion and RAG pipeline for Russian-language bloggers. It scrapes Telegram channels, processes media through download/transcribe/label/vectorize stages, and stores results in ChromaDB for semantic search. Only the **ingestion-service** (FastAPI on port 8002) is implemented; other planned microservices are not yet in the repo.
+Bloger Bot is a white-label Telegram bot platform for health/wellness bloggers. It provides RAG-powered Q&A, onboarding, diagnostics, and personalized content delivery. Full spec in `docs/TASK.md`, architecture in `docs/ARCHITECTURE.md`.
 
-### Architecture
+Currently implemented (Stage 1): content ingestion pipeline, LLM/RAG service, Telegram bot with onboarding, user-service API.
 
-- **Infrastructure**: PostgreSQL 16, Redis 7, ChromaDB 0.5.23 — all run via `docker compose -f docker-compose.dev.yml`
-- **Application**: FastAPI ingestion-service + 3 Celery workers (default, downloads, transcriptions)
-- **Python**: Requires >=3.11. Two editable packages: `libs/common` and `services/ingestion-service`
+### Architecture (9 services)
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| postgres | 5432 | Primary DB (users, sessions, messages, content, onboarding) |
+| redis | 6379 | Celery broker |
+| chromadb | 8000 | Vector DB for RAG |
+| ingestion-service | 8002 | Content pipeline API (parse, transcribe, label, vectorize) |
+| ingestion-worker | — | Celery: label + vectorize (queue: default) |
+| ingestion-transcription-worker | — | Celery: transcribe (queue: transcriptions) |
+| llm-service | 8003 | RAG engine: `POST /api/v1/ask` |
+| user-service | 8004 | User profiles, onboarding, sessions: `GET /api/v1/users/{tid}` |
+| telegram-bot-yuri | — | aiogram 3.x bot @yuri_kinash_bot (polling mode) |
+
+All services defined in `docker-compose.dev.yml`. Source code is volume-mounted for hot reload.
 
 ### Starting services
 
-1. **Start Docker daemon** (required in Cloud Agent VMs):
+1. **Start Docker daemon** (Cloud Agent VMs only):
    ```
    sudo dockerd &>/dev/null &
    sleep 3
    sudo chmod 666 /var/run/docker.sock
    ```
-2. **Start infrastructure**: `docker compose -f docker-compose.dev.yml up -d postgres redis chromadb`
-3. **Build + start app**: `docker compose -f docker-compose.dev.yml up -d --build ingestion-service`
-4. **Run migrations**: `docker exec workspace-ingestion-service-1 alembic -c /app/migrations/alembic.ini upgrade head`
-5. **Verify**: `curl http://localhost:8002/health` should return `{"status":"ok","service":"ingestion-service"}`
+2. **Start everything**: `docker compose -f docker-compose.dev.yml up -d --build`
+3. **Run migrations** (new migration files must be copied into the container first):
+   ```
+   docker cp migrations/versions/ workspace-ingestion-service-1:/app/migrations/versions/
+   docker exec workspace-ingestion-service-1 alembic -c /app/migrations/alembic.ini upgrade head
+   ```
+4. **Verify**:
+   - `curl http://localhost:8002/health` — ingestion-service
+   - `curl http://localhost:8003/health` — llm-service
+   - `curl http://localhost:8004/health` — user-service
+   - Bot logs: `docker compose -f docker-compose.dev.yml logs telegram-bot-yuri`
+
+### Required secrets / env vars
+
+- `OPENAI_API_KEY` — for LLM + RAG + embeddings
+- `TELEGRAM_BOT_TOKEN_YURI` — bot token from @BotFather
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — for Pyrogram content parsing
+- All set in `.env` (gitignored) or as Cursor Secrets
+
+### White-label config
+
+- Per-blogger config: `config/bloggers/{yuri,maria}.yaml` (token, Tone of Voice, RAG params, branding)
+- Per-blogger onboarding: `config/onboarding/{yuri}.yaml` (step definitions, questions, lead magnets)
+- `BLOGGER_ID` env var selects which config a service instance uses
+
+### DB schema
+
+Tables: `users`, `chat_sessions`, `chat_messages`, `onboarding_responses`, `content_sources`, `content_items`, `content_chunks`. Migrations in `migrations/versions/`. The ingestion-service Dockerfile copies but does NOT volume-mount the migrations dir — new migration files must be `docker cp`'d into the container before running `alembic upgrade`.
 
 ### Gotchas
 
-- The `Makefile` references a `migrate` Docker Compose service that does not exist in `docker-compose.dev.yml`. Run migrations via `docker exec` on the ingestion-service container instead.
-- The `Makefile` has some Windows-specific commands (PowerShell) for `db-dump`, `transcribe-process`, etc. These won't work on Linux.
-- The `PYTHONPATH` for local development must include both `libs/common/src` and `services/ingestion-service/src`.
-- A Python virtualenv at `.venv/` is used for local linting and tooling. Activate with `source .venv/bin/activate`.
-- Docker daemon in Cloud Agent VMs needs `fuse-overlayfs` storage driver and `iptables-legacy`. See the Docker setup in `.cursor/environment` snapshot.
+- **SQL in bot/db.py**: Use `CAST(:param AS enumtype)` not `::enumtype` — the latter conflicts with SQLAlchemy's `:param` syntax.
+- **Migrations**: Not volume-mounted. After creating a new migration file, `docker cp` it into the ingestion-service container before running alembic.
+- **Makefile**: OS-detection helpers `_TIMESTAMP` / `_PG_PASSWORD` auto-switch between Linux and Windows. The `migrate` Compose service doesn't exist — use `docker exec` instead.
+- **Redis password**: Comes from env var at container creation time. Check actual password with `docker inspect workspace-redis-1 | grep requirepass`.
+- **Onboarding scenarios**: Defined in YAML (`config/onboarding/`). Swap by editing the YAML file — no code changes needed. Bot reads config at startup.
 
-### Lint / Format / Test
+### Lint / Format
 
-- **Lint**: `source .venv/bin/activate && ruff check .` (28 pre-existing warnings, all in the original codebase)
-- **Format**: `source .venv/bin/activate && ruff format .`
-- **Tests**: `tests/test_pipeline.py` and `tests/test_rag.py` are integration scripts that require live PostgreSQL + ChromaDB + optional OpenAI API key. They are run as standalone scripts, not via pytest.
+- `source .venv/bin/activate && ruff check .`
+- `source .venv/bin/activate && ruff format .`
 
 ### Key API endpoints
 
-See `Makefile` for curl shortcuts. Core endpoints:
-- `GET /health` — service health
-- `POST /api/v1/sources/` — create content source
-- `GET /api/v1/sources/` — list sources
-- `GET /api/v1/jobs/stats` — pipeline statistics
-- `POST /api/v1/sources/{source_id}/parse` — trigger Telegram channel parsing
-- FastAPI docs at `http://localhost:8002/docs`
+**Ingestion** (port 8002): See `Makefile` for curl shortcuts. Swagger at `http://localhost:8002/docs`.
+
+**LLM** (port 8003):
+- `POST /api/v1/ask` — `{"query": "...", "blogger_id": "yuri"}` → RAG answer
+
+**User** (port 8004):
+- `GET /api/v1/users/{telegram_id}` — user profile
+- `GET /api/v1/users/{telegram_id}/onboarding` — onboarding responses
+- `GET /api/v1/users/{telegram_id}/sessions` — chat sessions
+- `GET /api/v1/sessions/{session_id}/messages` — message history
