@@ -108,7 +108,7 @@ def parse_telegram_channel(self, source_id: str):
     async def _parse():
         from ingestion_service.telegram_client import get_client
         from ingestion_service.services.job_manager import JobManager
-        from common.models.enums import ContentType
+        from common.models.enums import ContentType, JobStatus
         import uuid
 
         session_factory, engine = make_session_factory()
@@ -133,6 +133,7 @@ def parse_telegram_channel(self, source_id: str):
                 logger.info("parse_fetched", count=len(messages), source_id=source_id)
                 count = 0
                 media_item_ids = []
+                text_item_ids = []
                 max_message_id = source.last_parsed_message_id or 0
 
                 for message in reversed(messages):
@@ -162,6 +163,14 @@ def parse_telegram_channel(self, source_id: str):
                         max_message_id = message.id
                     if ct in (ContentType.VIDEO, ContentType.AUDIO):
                         media_item_ids.append(str(item.id))
+                    elif ct in (ContentType.TEXT, ContentType.POST) and item_data.get("text"):
+                        text = item_data["text"].strip()
+                        if len(text) >= 30 and item.status == JobStatus.DISCOVERED:
+                            await jm.update_item_status(
+                                item.id, JobStatus.TRANSCRIBED,
+                                transcript_text=text,
+                            )
+                            text_item_ids.append(str(item.id))
 
                 if max_message_id > (source.last_parsed_message_id or 0):
                     await jm.update_last_parsed_message_id(source.id, max_message_id)
@@ -170,7 +179,129 @@ def parse_telegram_channel(self, source_id: str):
                     download_media_batch.delay(media_item_ids)
                     logger.info("batch_download_queued", count=len(media_item_ids))
 
-                return {"parsed_count": count, "media_queued": len(media_item_ids)}
+                if text_item_ids:
+                    for tid in text_item_ids:
+                        label_item.delay(tid)
+                    logger.info("text_label_queued", count=len(text_item_ids))
+
+                return {"parsed_count": count, "media_queued": len(media_item_ids),
+                        "text_queued": len(text_item_ids)}
+        finally:
+            await engine.dispose()
+
+    return run_async(_parse())
+
+
+# ── Task 1b: Parse channel text posts (background, cancellable) ──────────────
+
+@celery_app.task(bind=True, name="parse_channel_text", max_retries=1,
+                 soft_time_limit=3600, time_limit=3900)
+def parse_channel_text(self, source_id: str, batch_size: int = 200, max_messages: int = 0):
+    """
+    Parse text posts from a Telegram channel in batches.
+    Runs in background; cancel via: celery_app.control.revoke(task_id, terminate=True)
+    max_messages=0 means unlimited.
+    """
+    async def _parse():
+        from ingestion_service.telegram_client import get_client
+        from ingestion_service.services.job_manager import JobManager
+        from common.models.enums import ContentType, JobStatus
+        import uuid
+
+        session_factory, engine = make_session_factory()
+        try:
+            async with session_factory() as session:
+                jm = JobManager(session)
+                source = await jm.get_source(uuid.UUID(source_id))
+                if not source:
+                    raise ValueError(f"Source {source_id} not found")
+
+                chat_id = source.config.get("channel_id") or source.config.get("chat_id")
+                if not chat_id:
+                    raise ValueError("No channel_id/chat_id in source config")
+
+                client = await get_client()
+                total_parsed = 0
+                total_text_queued = 0
+                max_message_id = source.last_parsed_message_id or 0
+                offset_id = 0
+                done = False
+
+                while not done:
+                    messages = []
+                    async for message in client.get_chat_history(
+                        chat_id if isinstance(chat_id, int) else chat_id,
+                        limit=batch_size,
+                        offset_id=offset_id,
+                    ):
+                        if source.last_parsed_message_id and message.id <= source.last_parsed_message_id:
+                            done = True
+                            break
+                        messages.append(message)
+
+                    if not messages:
+                        break
+
+                    offset_id = messages[-1].id
+
+                    for message in reversed(messages):
+                        item_data = _message_to_parsed_item(message)
+                        if not item_data:
+                            continue
+
+                        try:
+                            ct = ContentType(item_data["content_type"])
+                        except ValueError:
+                            ct = ContentType.TEXT
+
+                        if ct not in (ContentType.TEXT, ContentType.POST):
+                            continue
+                        text = (item_data.get("text") or "").strip()
+                        if len(text) < 30:
+                            continue
+
+                        item = await jm.upsert_content_item(
+                            source_id=source.id,
+                            source_message_id=item_data["source_message_id"],
+                            content_type=ct,
+                            blogger_id=source.blogger_id,
+                            text=text,
+                            date=item_data.get("date"),
+                            raw_metadata=item_data.get("raw_metadata", {}),
+                        )
+                        total_parsed += 1
+
+                        if message.id > max_message_id:
+                            max_message_id = message.id
+
+                        if item.status == JobStatus.DISCOVERED:
+                            await jm.update_item_status(
+                                item.id, JobStatus.TRANSCRIBED,
+                                transcript_text=text,
+                            )
+                            label_item.delay(str(item.id))
+                            total_text_queued += 1
+
+                    logger.info("parse_channel_text_batch",
+                                source_id=source_id, batch_parsed=len(messages),
+                                total_parsed=total_parsed, total_queued=total_text_queued)
+
+                    if max_messages and total_parsed >= max_messages:
+                        break
+
+                    self.update_state(state="PROGRESS", meta={
+                        "total_parsed": total_parsed,
+                        "total_queued": total_text_queued,
+                    })
+
+                if max_message_id > (source.last_parsed_message_id or 0):
+                    await jm.update_last_parsed_message_id(source.id, max_message_id)
+
+                logger.info("parse_channel_text_done",
+                            source_id=source_id,
+                            total_parsed=total_parsed,
+                            total_queued=total_text_queued)
+                return {"total_parsed": total_parsed, "total_queued": total_text_queued}
         finally:
             await engine.dispose()
 
@@ -457,8 +588,9 @@ def label_item(self, content_item_id: str):
             async with session_factory() as session:
                 jm = JobManager(session)
                 item = await jm.get_item(uuid.UUID(content_item_id))
-                if not item or not item.transcript_text:
-                    logger.warning("label_skip_no_transcript", item_id=content_item_id)
+                source_text = item.transcript_text or item.text if item else None
+                if not item or not source_text:
+                    logger.warning("label_skip_no_text", item_id=content_item_id)
                     return
 
                 await jm.update_item_status(item.id, JobStatus.LABELING)
@@ -474,7 +606,7 @@ def label_item(self, content_item_id: str):
 - is_paid: булево
 
 Текст:
-{item.transcript_text[:4000]}
+{source_text[:4000]}
 
 Только валидный JSON на русском языке."""
 
@@ -537,11 +669,12 @@ def vectorize_item(self, content_item_id: str):
             async with session_factory() as session:
                 jm = JobManager(session)
                 item = await jm.get_item(uuid.UUID(content_item_id))
-                if not item or not item.transcript_text:
+                source_text = item.transcript_text or item.text if item else None
+                if not item or not source_text:
                     return
 
                 await jm.update_item_status(item.id, JobStatus.CHUNKING)
-                chunks = _chunk_text(item.transcript_text, chunk_size=500, overlap=50)
+                chunks = _chunk_text(source_text, chunk_size=500, overlap=50)
 
                 if not chunks:
                     logger.error("no_chunks_produced", item_id=content_item_id)

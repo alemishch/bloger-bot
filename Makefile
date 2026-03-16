@@ -159,6 +159,12 @@ retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
 recover-all: ## Recover ALL stuck/failed items in one shot
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/recover-all" | python3 -m json.tool
 
+parse-text: ## Parse text posts: make parse-text SOURCE_ID=<uuid>
+	curl -s -X POST "http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse-text?max_messages=0" | python3 -m json.tool
+
+cancel-task: ## Cancel background task: make cancel-task TASK_ID=<id>
+	curl -s -X POST "http://localhost:8002/api/v1/sources/cancel-task/$(TASK_ID)" | python3 -m json.tool
+
 # ── Google Drive Sync ──
 sync-from-drive: ## Pull state from Google Drive
 	python tools/sync/sync_from_drive.py --yes-db
