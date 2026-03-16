@@ -128,6 +128,47 @@ services:
       postgres:
         condition: service_healthy
 
+  # ── LLM Service ──
+  llm-service:
+    build:
+      context: .
+      dockerfile: services/llm-service/Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      BLOGGER_ID: ${BLOGGER_ID:-yuri}
+    ports:
+      - "${LLM_SERVICE_PORT:-8003}:8000"
+    volumes:
+      - ./services/llm-service/src:/app/src
+      - ./config:/app/config
+    depends_on:
+      - chromadb
+
+  # ── Telegram Bot (Yuri) ──
+  telegram-bot-yuri:
+    build:
+      context: .
+      dockerfile: services/telegram-bot/Dockerfile
+    environment:
+      BLOGGER_ID: yuri
+      TELEGRAM_BOT_TOKEN_YURI: ${TELEGRAM_BOT_TOKEN_YURI:-}
+      LLM_SERVICE_URL: http://llm-service:8000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./services/telegram-bot/src:/app/src
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      llm-service:
+        condition: service_started
+
   prometheus:
     image: prom/prometheus:v2.53.0
     profiles: [monitoring]
