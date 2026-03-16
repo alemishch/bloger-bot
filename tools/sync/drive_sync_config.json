@@ -7,7 +7,6 @@
     "data/transcriptions",
     "data/labeled",
     "data/downloads",
-    "data/audio",
     "data/exports",
     "data/rag",
     "chroma_db",

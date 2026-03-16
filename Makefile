@@ -155,3 +155,13 @@ retry-failed-transcriptions: ## Retry transcription_failed (re-download corrupt 
 
 retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-stuck-chunking" | python -m json.tool
+
+recover-all: ## Recover ALL stuck/failed items in one shot
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/recover-all" | python3 -m json.tool
+
+# ── Google Drive Sync ──
+sync-from-drive: ## Pull state from Google Drive
+	python tools/sync/sync_from_drive.py --yes-db
+
+sync-to-drive: ## Push state to Google Drive
+	python tools/sync/sync_to_drive.py

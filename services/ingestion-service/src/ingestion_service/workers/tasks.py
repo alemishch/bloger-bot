@@ -323,8 +323,18 @@ def convert_and_transcribe(self, content_item_id: str):
                                                         error_message=f"Conversion failed: {e}")
                             raise self.retry(exc=e, countdown=60)
 
-                        # Update file_path to audio NOW (before transcription)
-                        await jm.update_item_status(item.id, JobStatus.TRANSCRIBING, file_path=audio_path)
+                        # Preserve original file name in raw_metadata for deduplication
+                        meta = item.raw_metadata or {}
+                        if "original_file_name" not in meta:
+                            meta["original_file_name"] = os.path.basename(source_path)
+                            meta["original_file_path"] = source_path
+                            await jm.update_item_status(
+                                item.id, JobStatus.TRANSCRIBING,
+                                file_path=audio_path,
+                                raw_metadata=meta,
+                            )
+                        else:
+                            await jm.update_item_status(item.id, JobStatus.TRANSCRIBING, file_path=audio_path)
 
                         # Delete original video to save space
                         if item.content_type == ContentType.VIDEO and os.path.exists(source_path):
@@ -367,6 +377,14 @@ def convert_and_transcribe(self, content_item_id: str):
                 )
                 logger.info("transcription_complete", item_id=content_item_id,
                             chunks=len(chunks), chars=len(full_transcript))
+
+                # Delete audio file after transcript is safely saved to DB
+                if os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                        logger.info("audio_deleted_after_transcription", path=audio_path)
+                    except OSError as e:
+                        logger.warning("audio_delete_failed", error=str(e))
 
                 label_item.delay(content_item_id)
                 return {"chars": len(full_transcript), "chunks": len(chunks)}
