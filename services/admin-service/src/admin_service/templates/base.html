@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Admin{% endblock %} — Bloger Bot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #f5f6fa; color: #2d3436; }
+        nav { background: #2d3436; padding: 12px 24px; display: flex; align-items: center; gap: 24px; }
+        nav a { color: #dfe6e9; text-decoration: none; font-size: 14px; }
+        nav a:hover, nav a.active { color: #fff; }
+        nav .brand { font-weight: 700; font-size: 16px; color: #fff; }
+        .container { max-width: 1200px; margin: 24px auto; padding: 0 16px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+        .card .label { font-size: 12px; color: #636e72; text-transform: uppercase; letter-spacing: .5px; }
+        .card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+        .card .sub { font-size: 12px; color: #00b894; margin-top: 2px; }
+        h1 { font-size: 24px; margin-bottom: 16px; }
+        h2 { font-size: 18px; margin: 24px 0 12px; }
+        table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+        th { background: #f8f9fa; text-align: left; padding: 12px 16px; font-size: 12px; text-transform: uppercase; color: #636e72; }
+        td { padding: 10px 16px; border-top: 1px solid #f1f2f6; font-size: 14px; }
+        tr:hover td { background: #f8f9fa; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-green { background: #d4edda; color: #155724; }
+        .badge-yellow { background: #fff3cd; color: #856404; }
+        .badge-gray { background: #e2e3e5; color: #383d41; }
+        .msg { padding: 8px 12px; margin: 4px 0; border-radius: 8px; max-width: 80%; font-size: 14px; line-height: 1.4; }
+        .msg-user { background: #d4edda; margin-left: auto; text-align: right; }
+        .msg-assistant { background: #e3f2fd; }
+        .msg-meta { font-size: 11px; color: #999; margin-top: 2px; }
+        .chat-container { display: flex; flex-direction: column; gap: 4px; padding: 16px; background: #fff; border-radius: 12px; max-height: 600px; overflow-y: auto; }
+        a.btn { display: inline-block; padding: 6px 14px; background: #2d3436; color: #fff; border-radius: 6px; text-decoration: none; font-size: 13px; }
+        .pipeline-bar { display: flex; gap: 2px; height: 24px; border-radius: 6px; overflow: hidden; margin-top: 8px; }
+        .pipeline-bar div { display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; min-width: 30px; }
+    </style>
+</head>
+<body>
+    <nav>
+        <span class="brand">🤖 Bloger Bot Admin</span>
+        <a href="/">Дашборд</a>
+        <a href="/users">Пользователи</a>
+        <a href="/api/v1/export/content?status=ready" target="_blank">📥 Экспорт контента</a>
+        <a href="/docs" target="_blank">API</a>
+    </nav>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>
