@@ -12,6 +12,7 @@ class SourceType(str, enum.Enum):
     TELEGRAM = "telegram"
     YOUTUBE = "youtube"
     PDF = "pdf"
+    YANDEX_DISK = "yandex_disk"
 
 
 class JobStatus(str, enum.Enum):

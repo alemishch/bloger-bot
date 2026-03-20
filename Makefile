@@ -166,6 +166,12 @@ cancel-task: ## Cancel background task: make cancel-task TASK_ID=<id>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/cancel-task/$(TASK_ID)" | python3 -m json.tool
 
 # ── Google Drive Sync ──
+ingest-yadisk: ## Ingest from Yandex Disk: make ingest-yadisk URL="https://disk.yandex.ru/d/XXX" NAME="folder name"
+	python tools/ingest_yandex_disk.py --url "$(URL)" --source-name "$(NAME)" --skip-existing
+
+ingest-yadisk-dry: ## Preview Yandex Disk folder: make ingest-yadisk-dry URL="https://disk.yandex.ru/d/XXX"
+	python tools/ingest_yandex_disk.py --url "$(URL)" --dry-run
+
 sync-from-drive: ## Pull state from Google Drive
 	python tools/sync/sync_from_drive.py --yes-db
 
