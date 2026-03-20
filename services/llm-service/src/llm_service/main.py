@@ -43,6 +43,25 @@ async def ask(req: AskRequest):
     return result
 
 
+class AnalyzeRequest(BaseModel):
+    onboarding_responses: list[dict]
+    blogger_id: Optional[str] = None
+    user_name: Optional[str] = None
+
+
+@app.post("/api/v1/analyze")
+async def analyze_profile(req: AnalyzeRequest):
+    """Analyze onboarding answers → problem zones + hypotheses (per TASK.md §4.3)."""
+    from llm_service.rag import analyze_onboarding
+    blogger = req.blogger_id or settings.BLOGGER_ID
+    result = await analyze_onboarding(
+        responses=req.onboarding_responses,
+        blogger_id=blogger,
+        user_name=req.user_name,
+    )
+    return result
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "llm-service"}

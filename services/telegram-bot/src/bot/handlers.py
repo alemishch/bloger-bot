@@ -1,4 +1,5 @@
-"""Telegram message handlers — onboarding + RAG Q&A."""
+"""Telegram message handlers — onboarding + analysis + RAG Q&A + commands."""
+import asyncio
 import structlog
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -6,20 +7,20 @@ from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
 
 from bot.config import settings, load_blogger_config
-from bot.llm_client import ask_llm
+from bot.llm_client import ask_llm, analyze_profile
 from bot.db import (
     upsert_user, save_onboarding_response, update_onboarding_state,
     get_user_state, get_or_create_session, save_chat_message,
+    get_onboarding_responses, clear_onboarding_responses,
 )
 from bot.onboarding import (
-    load_scenario, get_step, get_first_step_id,
+    get_step, get_first_step_id,
     build_step_message, get_lead_magnet_text,
 )
 
 logger = structlog.get_logger()
 router = Router()
 
-# In-memory multi-select accumulator: {telegram_id: {step_id: [values]}}
 _multi_select: dict[int, dict[str, list[str]]] = {}
 
 
@@ -28,14 +29,12 @@ def _cfg():
 
 
 async def _send_step(message_or_cb, step_id: str, user_name: str = "друг"):
-    """Send an onboarding step to the user."""
     step = get_step(step_id)
     if not step:
         logger.error("onboarding_step_not_found", step_id=step_id)
         return
 
     text, kb, parse_mode = build_step_message(step, user_name)
-
     target = message_or_cb if isinstance(message_or_cb, Message) else message_or_cb.message
     kwargs = {"reply_markup": kb} if kb else {}
     if parse_mode:
@@ -46,6 +45,51 @@ async def _send_step(message_or_cb, step_id: str, user_name: str = "друг"):
         next_id = step.get("next")
         if next_id:
             await _send_step(target, next_id, user_name)
+
+
+async def _run_analysis(target_message: Message, telegram_id: int, name: str):
+    """Generate problem zones + hypotheses from onboarding answers."""
+    responses = await get_onboarding_responses(telegram_id)
+    if not responses:
+        return
+
+    thinking = await target_message.answer("🧠 Анализирую твои ответы…")
+
+    try:
+        await target_message.bot.send_chat_action(target_message.chat.id, ChatAction.TYPING)
+        result = await analyze_profile(
+            onboarding_responses=[
+                {"step_id": r["step_id"], "answer_value": r["answer_value"]}
+                for r in responses
+            ],
+            blogger_id=settings.BLOGGER_ID,
+            user_name=name,
+        )
+
+        analysis = result.get("analysis", "")
+        if len(analysis) > 4000:
+            parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
+            await thinking.edit_text(parts[0])
+            for part in parts[1:]:
+                await target_message.answer(part)
+        else:
+            await thinking.edit_text(analysis)
+
+        await target_message.answer(
+            "💬 Теперь ты можешь задать мне любой вопрос — я подберу ответ из базы знаний Юрия.\n\n"
+            "Команды:\n"
+            "/profile — твой профиль и ответы\n"
+            "/reset — пройти онбординг заново\n"
+            "/help — все команды"
+        )
+
+        logger.info("analysis_complete", telegram_id=telegram_id)
+    except Exception as e:
+        logger.error("analysis_error", error=str(e), telegram_id=telegram_id)
+        await thinking.edit_text(
+            "📋 Спасибо за ответы! Анализ временно недоступен.\n\n"
+            "Ты можешь задать любой вопрос — я подберу ответ из базы знаний Юрия. 💬"
+        )
 
 
 # ── /start ──────────────────────────────────────────────────────────────────
@@ -61,8 +105,9 @@ async def cmd_start(message: Message):
     )
 
     name = message.from_user.first_name or "друг"
+    status = str(user_info.get("onboarding_status", "not_started"))
 
-    if user_info["is_new"] or user_info.get("onboarding_status") == "not_started":
+    if user_info["is_new"] or status == "not_started":
         logger.info("onboarding_start", telegram_id=message.from_user.id)
         first_step = get_first_step_id()
         await update_onboarding_state(message.from_user.id, "in_progress", first_step)
@@ -71,8 +116,106 @@ async def cmd_start(message: Message):
         cfg = _cfg()
         await message.answer(
             f"С возвращением, {name}! 👋\n\n"
-            f"Задай мне любой вопрос — я подберу ответ из базы знаний {cfg.get('display_name', 'эксперта')}."
+            f"Задай мне любой вопрос — я подберу ответ из базы знаний {cfg.get('display_name', 'эксперта')}.\n\n"
+            f"/help — список команд"
         )
+
+
+# ── /reset — clear and redo onboarding ─────────────────────────────────────
+
+@router.message(Command("reset"))
+async def cmd_reset(message: Message):
+    name = message.from_user.first_name or "друг"
+    await clear_onboarding_responses(message.from_user.id)
+    _multi_select.pop(message.from_user.id, None)
+    first_step = get_first_step_id()
+    await update_onboarding_state(message.from_user.id, "in_progress", first_step)
+    await message.answer("🔄 Начинаем заново!")
+    await _send_step(message, first_step, name)
+
+
+# ── /restart — alias for /reset ────────────────────────────────────────────
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message):
+    await cmd_reset(message)
+
+
+# ── /profile — show user's onboarding answers ──────────────────────────────
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message):
+    responses = await get_onboarding_responses(message.from_user.id)
+    user_state = await get_user_state(message.from_user.id)
+
+    if not responses:
+        await message.answer("У тебя пока нет данных. Пройди онбординг: /reset")
+        return
+
+    name = message.from_user.first_name or "друг"
+    status = str(user_state.get("onboarding_status", "?")) if user_state else "?"
+    lines = [f"👤 <b>Профиль: {name}</b>\n", f"Статус: {status}\n"]
+
+    label_map = {
+        "symptoms": "Беспокоит", "duration": "Длительность", "tried": "Пробовал(а)",
+        "lifestyle": "Ритм жизни", "blocker": "Мешает", "expert_experience": "Знакомство с Юрием",
+    }
+
+    for r in responses:
+        step = r.get("step_id", "")
+        if step in ("legal",):
+            continue
+        label = label_map.get(step, step)
+        val = r.get("answer_value", "")
+        lines.append(f"📌 <b>{label}:</b> {val}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ── /analyze — re-run analysis on current answers ──────────────────────────
+
+@router.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    name = message.from_user.first_name or "друг"
+    await _run_analysis(message, message.from_user.id, name)
+
+
+# ── /help ───────────────────────────────────────────────────────────────────
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    cfg = _cfg()
+    name = cfg.get("display_name", "эксперт")
+    await message.answer(
+        f"🤖 <b>Цифровой помощник {name}</b>\n\n"
+        f"💬 <b>Задай вопрос</b> — напиши текстом\n\n"
+        f"<b>Команды:</b>\n"
+        f"▪️ /start — начало\n"
+        f"▪️ /reset — пройти онбординг заново\n"
+        f"▪️ /profile — твои ответы из анкеты\n"
+        f"▪️ /analyze — повторный анализ проблемных зон\n"
+        f"▪️ /about — о боте\n"
+        f"▪️ /help — эта справка\n\n"
+        f"⚠️ {cfg.get('legal_disclaimer', '')}",
+        parse_mode="HTML",
+    )
+
+
+# ── /about ──────────────────────────────────────────────────────────────────
+
+@router.message(Command("about"))
+async def cmd_about(message: Message):
+    cfg = _cfg()
+    await message.answer(
+        f"ℹ️ <b>Цифровой помощник {cfg.get('display_name', '')}</b>\n\n"
+        f"Я использую базу знаний эксперта для ответов на вопросы "
+        f"о здоровье, психосоматике и работе с телом.\n\n"
+        f"Экспертные роли: врач, остеопат, клинический психолог, "
+        f"гипнотерапевт, специалист по биологическому декодированию.\n\n"
+        f"Я не заменяю врача и не ставлю диагнозы.\n\n"
+        f"Версия: 0.3.0",
+        parse_mode="HTML",
+    )
 
 
 # ── Onboarding callbacks ────────────────────────────────────────────────────
@@ -103,14 +246,13 @@ async def onboarding_callback(callback: CallbackQuery):
         selections = _multi_select[telegram_id][step_id]
         if value in selections:
             selections.remove(value)
-            await callback.answer(f"Убрано ❌")
+            await callback.answer("Убрано ❌")
         else:
             max_choices = step.get("max_choices", 10)
             if len(selections) >= max_choices:
                 await callback.answer(f"Максимум {max_choices} варианта")
                 return
             selections.append(value)
-            opt_text = next((o["text"] for o in step.get("options", []) if o["value"] == value), value)
             await callback.answer(f"Выбрано ✅ ({len(selections)})")
         return
 
@@ -143,63 +285,20 @@ async def onboarding_callback(callback: CallbackQuery):
         next_step = get_step(next_step_id)
         if next_step and next_step.get("finish"):
             await update_onboarding_state(telegram_id, "completed", next_step_id)
-            text, _, parse_mode = build_step_message(next_step, name)
-            await callback.message.answer(text)
+            await callback.answer()
 
-            if step_id == "symptoms" or "symptoms" in str(_multi_select.get(telegram_id, {})):
-                pass
             lead = get_lead_magnet_text(final_value.split(","))
             if lead.strip():
                 await callback.message.answer(lead)
+
+            await _run_analysis(callback.message, telegram_id, name)
         else:
             await update_onboarding_state(telegram_id, "in_progress", next_step_id)
             await _send_step(callback, next_step_id, name)
+            await callback.answer()
     else:
         await update_onboarding_state(telegram_id, "completed", step_id)
-
-    await callback.answer()
-
-
-# ── /help ───────────────────────────────────────────────────────────────────
-
-@router.message(Command("help"))
-async def cmd_help(message: Message):
-    cfg = _cfg()
-    name = cfg.get("display_name", "эксперт")
-    await message.answer(
-        f"🤖 <b>Что я умею:</b>\n\n"
-        f"💬 <b>Задать вопрос</b> — напиши текстом, я найду ответ из базы знаний {name}.\n\n"
-        f"📋 /about — информация о боте\n"
-        f"🔄 /restart — пройти онбординг заново\n"
-        f"❓ /help — эта справка\n\n"
-        f"⚠️ {cfg.get('legal_disclaimer', '')}",
-        parse_mode="HTML",
-    )
-
-
-# ── /about ──────────────────────────────────────────────────────────────────
-
-@router.message(Command("about"))
-async def cmd_about(message: Message):
-    cfg = _cfg()
-    await message.answer(
-        f"ℹ️ <b>Цифровой помощник {cfg.get('display_name', '')}</b>\n\n"
-        f"Я использую базу знаний эксперта для ответов на вопросы "
-        f"о здоровье, психосоматике и работе с телом.\n\n"
-        f"Я не заменяю врача и не ставлю диагнозы.\n\n"
-        f"Версия: 0.2.0 (Stage 1)",
-        parse_mode="HTML",
-    )
-
-
-# ── /restart — redo onboarding ──────────────────────────────────────────────
-
-@router.message(Command("restart"))
-async def cmd_restart(message: Message):
-    name = message.from_user.first_name or "друг"
-    first_step = get_first_step_id()
-    await update_onboarding_state(message.from_user.id, "in_progress", first_step)
-    await _send_step(message, first_step, name)
+        await callback.answer()
 
 
 # ── Text messages → RAG Q&A ─────────────────────────────────────────────────
@@ -213,20 +312,23 @@ async def handle_text(message: Message):
     user_state = await get_user_state(message.from_user.id)
     if user_state and str(user_state.get("onboarding_status")) == "in_progress":
         await message.answer(
-            "Сначала давай закончим знакомство! Нажми на одну из кнопок выше ☝️"
+            "Сначала давай закончим знакомство! Нажми на одну из кнопок выше ☝️\n"
+            "Или /reset чтобы начать заново."
         )
         return
 
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    thinking_msg = await message.answer("🔍 Изучаю вашу ситуацию…")
+    thinking_msg = await message.answer("🔍 Изучаю твою ситуацию…")
 
     try:
         session_id = await get_or_create_session(message.from_user.id, settings.BLOGGER_ID)
-
         if session_id and user_state:
             await save_chat_message(user_state["id"], session_id, "user", query)
 
+        await asyncio.sleep(0.5)
+        await thinking_msg.edit_text("📚 Подбираю релевантный опыт…")
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
         result = await ask_llm(query=query, blogger_id=settings.BLOGGER_ID)
         answer = result.get("answer", "Не удалось получить ответ.")
         if len(answer) > 4000:
@@ -243,5 +345,5 @@ async def handle_text(message: Message):
     except Exception as e:
         logger.error("llm_error", error=str(e), telegram_id=message.from_user.id)
         await thinking_msg.edit_text(
-            "😔 Произошла ошибка при обработке вопроса. Попробуйте ещё раз через минуту."
+            "😔 Произошла ошибка при обработке вопроса. Попробуй ещё раз через минуту."
         )

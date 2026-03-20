@@ -213,3 +213,15 @@ async def get_onboarding_responses(telegram_id: int) -> list[dict]:
             {"tid": telegram_id},
         )).mappings().all()
         return [dict(r) for r in rows]
+
+
+async def clear_onboarding_responses(telegram_id: int):
+    """Delete all onboarding responses for a user (for /reset)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text("""DELETE FROM onboarding_responses
+                    WHERE user_id = (SELECT id FROM users WHERE telegram_id = :tid)"""),
+            {"tid": telegram_id},
+        )
+        await session.commit()

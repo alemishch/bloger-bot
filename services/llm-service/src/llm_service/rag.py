@@ -92,3 +92,55 @@ async def rag_answer(
         ],
         "usage": usage,
     }
+
+
+async def analyze_onboarding(
+    responses: list[dict],
+    blogger_id: str,
+    user_name: str | None = None,
+) -> dict:
+    """Analyze onboarding responses → problem zones + hypotheses + next step."""
+    cfg = load_blogger_config(blogger_id)
+    system_prompt = cfg.get("tone_of_voice_prompt", "")
+    analysis_prompt = cfg.get("analysis_prompt", "")
+
+    responses_text = "\n".join(
+        f"- {r.get('step_id', '?')}: {r.get('answer_value', '?')}"
+        for r in responses
+    )
+
+    name = user_name or "пользователь"
+
+    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+    collection = get_chroma_collection(blogger_id)
+    symptoms = [r.get("answer_value", "") for r in responses if r.get("step_id") == "symptoms"]
+    symptom_query = " ".join(symptoms) if symptoms else "психосоматика здоровье"
+
+    emb = await openai_client.embeddings.create(model=settings.EMBED_MODEL, input=symptom_query)
+    results = collection.query(query_embeddings=[emb.data[0].embedding], n_results=5, include=["documents"])
+    context = "\n".join(results["documents"][0][:3]) if results["documents"] else ""
+
+    messages = [
+        {"role": "system", "content": system_prompt + "\n\n" + analysis_prompt},
+        {"role": "user", "content": (
+            f"Имя пользователя: {name}\n\n"
+            f"Ответы из онбординга:\n{responses_text}\n\n"
+            f"Релевантный контекст из базы знаний:\n{context[:3000]}\n\n"
+            f"Проанализируй и дай результат по структуре."
+        )},
+    ]
+
+    resp = await openai_client.chat.completions.create(
+        model=settings.CHAT_MODEL, messages=messages,
+        temperature=0.4, max_tokens=2000,
+    )
+
+    answer = resp.choices[0].message.content.strip()
+    return {
+        "analysis": answer,
+        "usage": {
+            "prompt_tokens": resp.usage.prompt_tokens,
+            "completion_tokens": resp.usage.completion_tokens,
+        },
+    }
