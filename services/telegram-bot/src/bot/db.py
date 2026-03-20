@@ -225,3 +225,86 @@ async def clear_onboarding_responses(telegram_id: int):
             {"tid": telegram_id},
         )
         await session.commit()
+
+
+async def get_session_history(telegram_id: int, max_messages: int = 20) -> list[dict]:
+    """Get messages from last 2 sessions (hot memory per §14.2)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = (await session.execute(
+            text("""
+                SELECT cm.role, cm.content
+                FROM chat_messages cm
+                JOIN chat_sessions cs ON cm.session_id = cs.id
+                JOIN users u ON cs.user_id = u.id
+                WHERE u.telegram_id = :tid
+                ORDER BY cm.created_at DESC
+                LIMIT :lim
+            """),
+            {"tid": telegram_id, "lim": max_messages},
+        )).mappings().all()
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
+async def get_long_term_profile(telegram_id: int) -> dict | None:
+    """Get user's cold profile JSON (per §14.4)."""
+    factory = get_session_factory()
+    async with factory() as session:
+        row = (await session.execute(
+            text("SELECT long_term_profile FROM users WHERE telegram_id = :tid"),
+            {"tid": telegram_id},
+        )).mappings().first()
+        return row["long_term_profile"] if row and row["long_term_profile"] else None
+
+
+async def update_long_term_profile(telegram_id: int, profile: dict):
+    """Update user's cold profile JSON."""
+    import json as _json
+    profile_str = _json.dumps(profile, ensure_ascii=False)
+    if len(profile_str) > 4000:
+        profile_str = profile_str[:4000]
+        profile = _json.loads(profile_str[:profile_str.rfind('"')] + '"}')
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text("UPDATE users SET long_term_profile = CAST(:p AS json), updated_at = NOW() WHERE telegram_id = :tid"),
+            {"p": _json.dumps(profile, ensure_ascii=False), "tid": telegram_id},
+        )
+        await session.commit()
+
+
+async def get_closed_session_for_update(telegram_id: int) -> dict | None:
+    """Get most recently closed session that hasn't been summarized yet."""
+    factory = get_session_factory()
+    async with factory() as session:
+        row = (await session.execute(
+            text("""
+                SELECT cs.id, cs.closed_at
+                FROM chat_sessions cs JOIN users u ON cs.user_id = u.id
+                WHERE u.telegram_id = :tid AND cs.is_active = false AND cs.summary IS NULL
+                ORDER BY cs.closed_at DESC LIMIT 1
+            """),
+            {"tid": telegram_id},
+        )).mappings().first()
+        if not row:
+            return None
+
+        msgs = (await session.execute(
+            text("SELECT role, content FROM chat_messages WHERE session_id = CAST(:sid AS uuid) ORDER BY created_at"),
+            {"sid": str(row["id"])},
+        )).mappings().all()
+
+        return {
+            "session_id": str(row["id"]),
+            "messages": [{"role": m["role"], "content": m["content"]} for m in msgs],
+        }
+
+
+async def mark_session_summarized(session_id: str, summary: str):
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text("UPDATE chat_sessions SET summary = :s WHERE id = CAST(:sid AS uuid)"),
+            {"s": summary[:2000], "sid": session_id},
+        )
+        await session.commit()

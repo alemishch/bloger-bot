@@ -7,11 +7,14 @@ from aiogram.filters import CommandStart, Command
 from aiogram.enums import ChatAction
 
 from bot.config import settings, load_blogger_config
-from bot.llm_client import ask_llm, analyze_profile
+from bot.llm_client import ask_llm, analyze_profile, update_profile_via_llm
 from bot.db import (
     upsert_user, save_onboarding_response, update_onboarding_state,
     get_user_state, get_or_create_session, save_chat_message,
     get_onboarding_responses, clear_onboarding_responses,
+    get_session_history, get_long_term_profile,
+    update_long_term_profile, get_closed_session_for_update,
+    mark_session_summarized,
 )
 from bot.onboarding import (
     get_step, get_first_step_id,
@@ -22,6 +25,36 @@ logger = structlog.get_logger()
 router = Router()
 
 _multi_select: dict[int, dict[str, list[str]]] = {}
+
+
+async def _try_update_profile(telegram_id: int):
+    """Background: check if a session was recently closed → update long-term profile."""
+    try:
+        closed = await get_closed_session_for_update(telegram_id)
+        if not closed or not closed["messages"]:
+            return
+
+        current_profile = await get_long_term_profile(telegram_id)
+        user_state = await get_user_state(telegram_id)
+        name = None
+        if user_state and current_profile:
+            name = current_profile.get("name")
+
+        result = await update_profile_via_llm(
+            messages=closed["messages"],
+            current_profile=current_profile,
+            blogger_id=settings.BLOGGER_ID,
+            user_name=name,
+        )
+
+        if result.get("profile"):
+            await update_long_term_profile(telegram_id, result["profile"])
+        if result.get("summary"):
+            await mark_session_summarized(closed["session_id"], result["summary"])
+
+        logger.info("profile_updated", telegram_id=telegram_id)
+    except Exception as e:
+        logger.warning("profile_update_failed", telegram_id=telegram_id, error=str(e))
 
 
 def _cfg():
@@ -318,18 +351,26 @@ async def handle_text(message: Message):
         return
 
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
-    thinking_msg = await message.answer("🔍 Изучаю твою ситуацию…")
+    thinking_msg = await message.answer("🔍 Изучаю вашу ситуацию…")
 
     try:
         session_id = await get_or_create_session(message.from_user.id, settings.BLOGGER_ID)
         if session_id and user_state:
             await save_chat_message(user_state["id"], session_id, "user", query)
 
-        await asyncio.sleep(0.5)
+        chat_history = await get_session_history(message.from_user.id, max_messages=16)
+        user_profile = await get_long_term_profile(message.from_user.id)
+
+        await asyncio.sleep(0.3)
         await thinking_msg.edit_text("📚 Подбираю релевантный опыт…")
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-        result = await ask_llm(query=query, blogger_id=settings.BLOGGER_ID)
+        result = await ask_llm(
+            query=query,
+            blogger_id=settings.BLOGGER_ID,
+            chat_history=chat_history,
+            user_profile=user_profile,
+        )
         answer = result.get("answer", "Не удалось получить ответ.")
         if len(answer) > 4000:
             answer = answer[:4000] + "…"
@@ -338,6 +379,8 @@ async def handle_text(message: Message):
         if session_id and user_state:
             token_count = result.get("usage", {}).get("completion_tokens")
             await save_chat_message(user_state["id"], session_id, "assistant", answer, token_count)
+
+        asyncio.create_task(_try_update_profile(message.from_user.id))
 
         logger.info("question_answered",
                      telegram_id=message.from_user.id,

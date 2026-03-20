@@ -24,6 +24,7 @@ class AskRequest(BaseModel):
     query: str
     blogger_id: Optional[str] = None
     chat_history: Optional[list[dict]] = None
+    user_profile: Optional[dict] = None
 
 
 class AskResponse(BaseModel):
@@ -39,6 +40,7 @@ async def ask(req: AskRequest):
         query=req.query,
         blogger_id=blogger,
         chat_history=req.chat_history,
+        user_profile=req.user_profile,
     )
     return result
 
@@ -56,6 +58,27 @@ async def analyze_profile(req: AnalyzeRequest):
     blogger = req.blogger_id or settings.BLOGGER_ID
     result = await analyze_onboarding(
         responses=req.onboarding_responses,
+        blogger_id=blogger,
+        user_name=req.user_name,
+    )
+    return result
+
+
+class UpdateProfileRequest(BaseModel):
+    messages: list[dict]
+    current_profile: Optional[dict] = None
+    blogger_id: Optional[str] = None
+    user_name: Optional[str] = None
+
+
+@app.post("/api/v1/update-profile")
+async def update_profile(req: UpdateProfileRequest):
+    """Session-updater agent: analyze dialogue → update long-term profile (per §14.3)."""
+    from llm_service.rag import update_user_profile
+    blogger = req.blogger_id or settings.BLOGGER_ID
+    result = await update_user_profile(
+        messages=req.messages,
+        current_profile=req.current_profile,
         blogger_id=blogger,
         user_name=req.user_name,
     )

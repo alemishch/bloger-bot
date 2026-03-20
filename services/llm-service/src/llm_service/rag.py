@@ -19,6 +19,7 @@ async def rag_answer(
     query: str,
     blogger_id: str,
     chat_history: list[dict] | None = None,
+    user_profile: dict | None = None,
 ) -> dict:
     cfg = load_blogger_config(blogger_id)
     rag_cfg = cfg.get("rag", {})
@@ -55,10 +56,15 @@ async def rag_answer(
 
     context_text = "\n\n".join(context_pieces)[:max_context_chars]
 
-    messages = [{"role": "system", "content": system_prompt}]
+    profile_block = ""
+    if user_profile:
+        import json as _json
+        profile_block = f"\n\n═══ ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ═══\n{_json.dumps(user_profile, ensure_ascii=False, indent=2)}\n═══════════════════════════\nУчитывай профиль при ответе. Обращайся по имени если оно указано."
+
+    messages = [{"role": "system", "content": system_prompt + profile_block}]
 
     if chat_history:
-        for msg in chat_history[-6:]:
+        for msg in chat_history[-10:]:
             messages.append(msg)
 
     user_prompt = f"Вопрос: {query}"
@@ -139,6 +145,70 @@ async def analyze_onboarding(
     answer = resp.choices[0].message.content.strip()
     return {
         "analysis": answer,
+        "usage": {
+            "prompt_tokens": resp.usage.prompt_tokens,
+            "completion_tokens": resp.usage.completion_tokens,
+        },
+    }
+
+
+async def update_user_profile(
+    messages: list[dict],
+    current_profile: dict | None,
+    blogger_id: str,
+    user_name: str | None = None,
+) -> dict:
+    """Session-updater agent (per §14.3): analyze dialogue → update profile fields."""
+    import json as _json
+
+    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+    current = _json.dumps(current_profile or {}, ensure_ascii=False, indent=2)
+    dialogue = "\n".join(f"[{m['role']}]: {m['content'][:500]}" for m in messages[-20:])
+
+    prompt = f"""Ты — агент-апдейтер профиля пользователя. Проанализируй диалог и реши, 
+нужно ли обновить поля профиля. Если в сессии не было новой значимой информации — верни текущий профиль без изменений.
+
+ПОЛЯ ПРОФИЛЯ (§14.4):
+- name: как пользователь просит себя называть (только если явно назвал)
+- communication_style: формально/неформально, короткие/развёрнутые ответы (из паттерна переписки)
+- goals: чего хочет достичь (только если говорил явно)
+- topics_of_interest: темы из диалогов (ЖКТ, сон, тревога и т.д.)
+- reactions: что заходило хорошо, что вызвало негатив (только явные сигналы)
+- last_session_summary: 3-5 предложений о чём была эта сессия
+- previous_session_summary: перенеси сюда старый last_session_summary
+
+ПРАВИЛА:
+- Не домысливай возраст, профессию, эмоциональное состояние
+- Сжимай устаревшие данные, не дописывай поверх
+- Итоговый JSON должен быть ≤ 4000 символов
+- Верни ТОЛЬКО валидный JSON, без markdown
+
+ТЕКУЩИЙ ПРОФИЛЬ:
+{current}
+
+ДИАЛОГ:
+{dialogue}
+
+Верни обновлённый JSON профиля:"""
+
+    resp = await openai_client.chat.completions.create(
+        model=settings.CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2, max_tokens=1000,
+        response_format={"type": "json_object"},
+    )
+
+    try:
+        updated = _json.loads(resp.choices[0].message.content)
+    except _json.JSONDecodeError:
+        updated = current_profile or {}
+
+    summary = updated.get("last_session_summary", "")
+
+    return {
+        "profile": updated,
+        "summary": summary,
         "usage": {
             "prompt_tokens": resp.usage.prompt_tokens,
             "completion_tokens": resp.usage.completion_tokens,
