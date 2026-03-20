@@ -260,6 +260,16 @@ def main():
         audio_path = AUDIO_DIR / (video_path.stem + ".mp3")
 
         try:
+            # Check if transcript backup already exists (from a previous failed run)
+            transcript_backup = Path("data/yadisk_transcripts") / f"{video_path.stem}.txt"
+            if transcript_backup.exists() and transcript_backup.stat().st_size > 100:
+                print(f"  📄 Using existing transcript backup: {transcript_backup}")
+                transcript = transcript_backup.read_text(encoding="utf-8")
+                item_id = upsert_content_item(source_id, file_info, transcript, args.blogger_id)
+                print(f"  💾 Saved: {item_id}")
+                processed += 1
+                continue
+
             dl_url = get_download_url(args.url, file_info["path"])
             if not download_file(dl_url, video_path, file_info["size"]):
                 print(f"  ❌ Download failed")
@@ -273,6 +283,12 @@ def main():
 
             transcript = transcribe(audio_path, api_key)
             print(f"  📝 Transcript: {len(transcript)} chars")
+
+            # Save transcript backup before DB insert (in case DB fails)
+            transcript_backup = Path("data/yadisk_transcripts") / f"{video_path.stem}.txt"
+            transcript_backup.parent.mkdir(parents=True, exist_ok=True)
+            transcript_backup.write_text(transcript, encoding="utf-8")
+            print(f"  💾 Transcript backup: {transcript_backup}")
 
             audio_path.unlink(missing_ok=True)
             print(f"  🗑️  Deleted audio")
