@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Дашборд{% endblock %}
+{% block content %}
+<h1>📊 Дашборд</h1>
+
+<div class="grid">
+    <div class="card">
+        <div class="label">Всего пользователей</div>
+        <div class="value">{{ stats.total_users }}</div>
+        <div class="sub">+{{ stats.new_users_24h }} за 24ч</div>
+    </div>
+    <div class="card">
+        <div class="label">Прошли онбординг</div>
+        <div class="value">{{ stats.onboarded }}</div>
+        <div class="sub">{{ (stats.onboarded / (stats.total_users or 1) * 100) | round(1) }}% конверсия</div>
+    </div>
+    <div class="card">
+        <div class="label">Сессий чата</div>
+        <div class="value">{{ stats.total_sessions }}</div>
+    </div>
+    <div class="card">
+        <div class="label">Сообщений</div>
+        <div class="value">{{ stats.total_messages }}</div>
+        <div class="sub">+{{ stats.messages_24h }} за 24ч</div>
+    </div>
+    <div class="card">
+        <div class="label">Контент в базе</div>
+        <div class="value">{{ stats.total_content }}</div>
+    </div>
+</div>
+
+<h2>🔄 Пайплайн контента</h2>
+<div class="card">
+    <table>
+        <tr>
+            <th>Статус</th>
+            <th>Количество</th>
+            <th>Доля</th>
+        </tr>
+        {% for status, count in stats.pipeline.items() %}
+        <tr>
+            <td>
+                {% if status == 'ready' %}<span class="badge badge-green">{{ status }}</span>
+                {% elif 'failed' in status %}<span class="badge" style="background:#f8d7da;color:#721c24">{{ status }}</span>
+                {% else %}<span class="badge badge-gray">{{ status }}</span>{% endif %}
+            </td>
+            <td>{{ count }}</td>
+            <td>{{ (count / (stats.total_content or 1) * 100) | round(1) }}%</td>
+        </tr>
+        {% endfor %}
+    </table>
+
+    <div class="pipeline-bar">
+        {% set colors = {'ready': '#00b894', 'labeled': '#0984e3', 'transcribed': '#6c5ce7', 'downloaded': '#fdcb6e', 'discovered': '#dfe6e9', 'chunking': '#00cec9', 'labeling': '#a29bfe'} %}
+        {% for status, count in stats.pipeline.items() %}
+        {% set pct = (count / (stats.total_content or 1) * 100) %}
+        {% if pct > 0.5 %}
+        <div style="width:{{ pct }}%; background:{{ colors.get(status, '#b2bec3') }}" title="{{ status }}: {{ count }}">
+            {% if pct > 5 %}{{ status }}{% endif %}
+        </div>
+        {% endif %}
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

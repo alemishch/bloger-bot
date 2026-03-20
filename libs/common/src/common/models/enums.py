@@ -34,3 +34,9 @@ class JobStatus(str, enum.Enum):
 class BloggerID(str, enum.Enum):
     YURI = "yuri"
     MARIA = "maria"
+
+
+class OnboardingStatus(str, enum.Enum):
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"

@@ -19,7 +19,7 @@ pip-wheel-metadata/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
+*.rar
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -359,6 +359,9 @@ storybook-static/
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 📦 PROJECT-SPECIFIC
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Google Drive sync staging (tools/sync)
+.drive_sync_staging/
 
 # Logs
 logs/

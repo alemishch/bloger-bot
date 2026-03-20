@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Пользователи{% endblock %}
+{% block content %}
+<h1>👥 Пользователи</h1>
+
+<table>
+    <tr>
+        <th>Telegram ID</th>
+        <th>Имя</th>
+        <th>Username</th>
+        <th>Блогер</th>
+        <th>Онбординг</th>
+        <th>Сообщений</th>
+        <th>Регистрация</th>
+        <th></th>
+    </tr>
+    {% for u in users %}
+    <tr>
+        <td>{{ u.telegram_id }}</td>
+        <td>{{ u.first_name or '—' }}</td>
+        <td>{{ ('@' + u.username) if u.username else '—' }}</td>
+        <td>{{ u.blogger_id }}</td>
+        <td>
+            {% if u.onboarding_status == 'completed' %}<span class="badge badge-green">✅ Пройден</span>
+            {% elif u.onboarding_status == 'in_progress' %}<span class="badge badge-yellow">⏳ В процессе</span>
+            {% else %}<span class="badge badge-gray">Не начат</span>{% endif %}
+        </td>
+        <td>{{ u.msg_count }}</td>
+        <td>{{ u.created_at.strftime('%d.%m.%Y %H:%M') if u.created_at else '—' }}</td>
+        <td><a class="btn" href="/dialogues/{{ u.telegram_id }}">💬 Диалоги</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
