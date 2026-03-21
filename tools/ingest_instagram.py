@@ -31,7 +31,7 @@ WHISPER_MAX_BYTES = 24 * 1024 * 1024
 MIN_CAPTION_LENGTH = 100
 
 
-def list_posts(username: str) -> tuple[list[dict], list[dict]]:
+def list_posts(username: str, session_file: str | None = None) -> tuple[list[dict], list[dict]]:
     """List reels and text posts from public Instagram profile using instaloader."""
     import instaloader
     L = instaloader.Instaloader(
@@ -40,6 +40,9 @@ def list_posts(username: str) -> tuple[list[dict], list[dict]]:
         save_metadata=False, compress_json=False,
         quiet=True,
     )
+    if session_file and os.path.exists(session_file):
+        L.load_session_from_file(username="", filename=session_file)
+        print("  🔑 Loaded Instagram session")
 
     profile = instaloader.Profile.from_username(L.context, username)
     reels = []
@@ -181,6 +184,8 @@ def main():
     parser.add_argument("--reels-only", action="store_true")
     parser.add_argument("--posts-only", action="store_true")
     parser.add_argument("--max-files", type=int, default=0)
+    parser.add_argument("--cookies", default=None, help="Path to cookies.txt for yt-dlp (reels download)")
+    parser.add_argument("--ig-session", default=None, help="Path to instaloader session file")
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -189,7 +194,7 @@ def main():
 
     print(f"\n📸 Scanning Instagram: @{args.username}")
     print("  (this may take a minute for large profiles...)")
-    reels, posts = list_posts(args.username)
+    reels, posts = list_posts(args.username, args.ig_session)
     print(f"  🎬 Reels: {len(reels)}")
     print(f"  📝 Posts (≥{MIN_CAPTION_LENGTH} chars): {len(posts)}\n")
 

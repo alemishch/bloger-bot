@@ -425,6 +425,18 @@
 - Доступ к каналам предоставляется заказчиком
 - Требуется автоматизация парсинга контента из Telegram и Yandex Disk
 
+**YouTube канал (Юрий):**
+- Канал: https://www.youtube.com/@kinashyuriy
+- ~70 полных видео (63 часа контента), шорты не включаются
+- Пайплайн: yt-dlp аудио → Whisper → разметка → векторизация
+- Метаданные: youtube_id, url, title, description, views, likes, thumbnail
+
+**Instagram (Юрий):**
+- Профиль: https://www.instagram.com/kinashyuriy
+- Рилс (instagram_reels): скачивание → транскрибация + caption
+- Посты (instagram_post): текст caption (≥100 символов)
+- Метаданные: shortcode, url, timestamp, likes, comments
+
 **Источники Yandex Disk (Юрий):**
 - «Готовые» — готовые смонтированные видео + папка «Перепрошивка» (9 файлов)
 - «Разборы» — разборы кейсов + папка «на монтаж» (11 файлов)
