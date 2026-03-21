@@ -163,8 +163,11 @@ def apply_import(repo_root: Path, source: Path, confirm_db: bool = True, dry_run
     else:
         print("5️⃣  ⏭️  No downloads\n")
 
-    # ── 6. Extra: data/audio, data/exports, data/rag, chroma_db, vector_store, etc. ──
-    for rel in ["data/audio", "data/exports", "data/rag", "chroma_db", "vector_store", "chromadb", "qdrant_storage"]:
+    # ── 6. Extra paths from config (data/audio, data/exports, transcripts, etc.) ──
+    config = load_config(repo_root)
+    extra_paths = config.get("paths", [])
+    handled = {"sessions", "data/transcriptions", "data/labeled", "data/downloads"}
+    for rel in [p for p in extra_paths if p not in handled] + ["chroma_db", "vector_store", "chromadb", "qdrant_storage"]:
         src = source / rel
         if not src.exists():
             continue
