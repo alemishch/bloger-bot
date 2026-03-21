@@ -541,3 +541,4 @@ docker-compose.override.yml
 kubeconfig
 *.kubeconfig
 !k8s/example-*.yaml
+*.webm

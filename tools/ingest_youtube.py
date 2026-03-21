@@ -47,7 +47,8 @@ def list_videos(channel_url: str) -> list[dict]:
     return videos
 
 
-def download_audio(video_id: str, output_dir: Path, cookies_file: str | None = None) -> Path | None:
+def download_audio(video_id: str, output_dir: Path, cookies_file: str | None = None,
+                    cookies_from_browser: str | None = None, proxy: str | None = None) -> Path | None:
     """Download audio-only from YouTube video."""
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{video_id}.mp3"
@@ -63,6 +64,10 @@ def download_audio(video_id: str, output_dir: Path, cookies_file: str | None = N
     }
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
+    if cookies_from_browser:
+        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    if proxy:
+        ydl_opts["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
@@ -194,7 +199,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--max-files", type=int, default=0)
-    parser.add_argument("--cookies", default=None, help="Path to cookies.txt (Netscape format). Export from browser with 'Get cookies.txt' extension")
+    parser.add_argument("--cookies", default=None, help="Path to cookies.txt (Netscape format)")
+    parser.add_argument("--cookies-from-browser", default=None, help="Browser name (e.g. 'chrome')")
+    parser.add_argument("--proxy", default=None, help="Proxy URL (e.g. http://user:pass@host:port)")
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -230,7 +237,7 @@ def main():
                 print(f"  📄 Using transcript backup")
                 transcript = transcript_file.read_text(encoding="utf-8")
             else:
-                audio = download_audio(video["id"], AUDIO_DIR, args.cookies)
+                audio = download_audio(video["id"], AUDIO_DIR, args.cookies, args.cookies_from_browser, args.proxy)
                 if not audio:
                     continue
                 transcript = transcribe(audio, api_key)
