@@ -159,6 +159,9 @@ retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
 recover-all: ## Recover ALL stuck/failed items in one shot
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/recover-all" | python3 -m json.tool
 
+queue-labeled: ## Queue all labeled items for vectorization (fixes stuck chunking)
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-labeled?limit=1000" | python3 -m json.tool
+
 parse-text: ## Parse text posts: make parse-text SOURCE_ID=<uuid>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse-text?max_messages=0" | python3 -m json.tool
 
@@ -166,6 +169,24 @@ cancel-task: ## Cancel background task: make cancel-task TASK_ID=<id>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/cancel-task/$(TASK_ID)" | python3 -m json.tool
 
 # ── Google Drive Sync ──
+ingest-youtube: ## Ingest YouTube channel: make ingest-youtube CHANNEL="https://www.youtube.com/@kinashyuriy"
+	python tools/ingest_youtube.py --channel "$(CHANNEL)" --skip-existing
+
+ingest-youtube-dry: ## Preview YouTube channel: make ingest-youtube-dry CHANNEL="..."
+	python tools/ingest_youtube.py --channel "$(CHANNEL)" --dry-run
+
+ingest-instagram: ## Ingest Instagram: make ingest-instagram USER=kinashyuriy
+	python tools/ingest_instagram.py --username "$(USER)" --skip-existing
+
+ingest-instagram-dry: ## Preview Instagram: make ingest-instagram-dry USER=kinashyuriy
+	python tools/ingest_instagram.py --username "$(USER)" --dry-run
+
+ingest-yadisk: ## Ingest from Yandex Disk: make ingest-yadisk URL="https://disk.yandex.ru/d/XXX" NAME="folder name"
+	python tools/ingest_yandex_disk.py --url "$(URL)" --source-name "$(NAME)" --skip-existing
+
+ingest-yadisk-dry: ## Preview Yandex Disk folder: make ingest-yadisk-dry URL="https://disk.yandex.ru/d/XXX"
+	python tools/ingest_yandex_disk.py --url "$(URL)" --dry-run
+
 sync-from-drive: ## Pull state from Google Drive
 	python tools/sync/sync_from_drive.py --yes-db
 

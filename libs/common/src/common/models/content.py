@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, Integer, Float, DateTime, ForeignKey, JSON, Boolean, Index
+from sqlalchemy import String, Text, Integer, BigInteger, Float, DateTime, ForeignKey, JSON, Boolean, Index
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
@@ -51,7 +51,7 @@ class ContentItem(Base):
     text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     media_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     file_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     transcript_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)

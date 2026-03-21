@@ -338,3 +338,34 @@ async def trigger_label(item_id: uuid.UUID, session: AsyncSession = Depends(get_
         raise HTTPException(status_code=404, detail="Item not found")
     label_item.delay(str(item_id))
     return {"item_id": str(item_id), "status": "label_queued"}
+
+@router.post("/queue-labeled")
+async def queue_labeled_for_vectorization(
+    limit: int = Query(1000, le=5000),
+    session: AsyncSession = Depends(get_session),
+):
+    """Queue all labeled items for vectorization. Also resets stuck chunking items."""
+    from ingestion_service.workers.tasks import vectorize_item
+
+    # Reset stuck chunking → labeled
+    stuck = await session.execute(
+        select(ContentItem).where(ContentItem.status == JobStatus.CHUNKING)
+    )
+    stuck_items = list(stuck.scalars().all())
+    for item in stuck_items:
+        item.status = JobStatus.LABELED
+        item.updated_at = __import__("datetime").datetime.utcnow()
+    await session.commit()
+
+    # Queue all labeled
+    q = (
+        select(ContentItem)
+        .where(ContentItem.status == JobStatus.LABELED)
+        .order_by(ContentItem.created_at)
+        .limit(limit)
+    )
+    result = await session.execute(q)
+    items = list(result.scalars().all())
+    for item in items:
+        vectorize_item.delay(str(item.id))
+    return {"reset_chunking": len(stuck_items), "queued": len(items)}
