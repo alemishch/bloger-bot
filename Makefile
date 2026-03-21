@@ -159,6 +159,9 @@ retry-stuck-chunking: ## Reset stuck chunking items and re-queue vectorization
 recover-all: ## Recover ALL stuck/failed items in one shot
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/recover-all" | python3 -m json.tool
 
+queue-labeled: ## Queue all labeled items for vectorization (fixes stuck chunking)
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-labeled?limit=1000" | python3 -m json.tool
+
 parse-text: ## Parse text posts: make parse-text SOURCE_ID=<uuid>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse-text?max_messages=0" | python3 -m json.tool
 
