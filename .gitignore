@@ -16,6 +16,7 @@ venv.bak/
 virtualenv/
 pip-wheel-metadata/
 *.session
+cookies/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

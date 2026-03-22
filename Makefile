@@ -1,7 +1,8 @@
 .PHONY: help up down build logs ps migrate migrate-create migrate-down \
 		up-infra parse pipeline-stats list-items create-source \
 		transcriber-install transcribe-file transcribe-process transcribe-watch transcribe-status \
-		export-state export-state-to import-state db-dump db-restore health lint format
+		export-state export-state-to import-state db-dump db-restore health lint format \
+		youtube-cookies instagram-cookies ingest-youtube ingest-youtube-dry ingest-instagram
 
 # ── OS helpers ──
 ifeq ($(OS),Windows_NT)
@@ -169,16 +170,22 @@ cancel-task: ## Cancel background task: make cancel-task TASK_ID=<id>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/cancel-task/$(TASK_ID)" | python3 -m json.tool
 
 # ── Google Drive Sync ──
-ingest-youtube: ## Ingest YouTube channel: make ingest-youtube CHANNEL="https://www.youtube.com/@kinashyuriy"
-	python tools/ingest_youtube.py --channel "$(CHANNEL)" --skip-existing
+youtube-cookies: ## Export cookies/youtube.txt via Playwright (log in once in the browser window)
+	python tools/youtube_refresh_cookies.py
+
+instagram-cookies: ## Export cookies/instagram.txt via Playwright (log in to Instagram once)
+	python tools/instagram_refresh_cookies.py
+
+ingest-instagram: ## IG ingest (Playwright listing + yt-dlp reels). make instagram-cookies USER=... first
+	python tools/ingest_instagram.py --username "$(USER)" --skip-existing $(if $(COOKIES_BROWSER),--cookies-from-browser $(COOKIES_BROWSER),)
+
+ingest-youtube: ## Ingest YouTube channel. Prefer: make youtube-cookies first. Optional: COOKIES_BROWSER=firefox
+	python tools/ingest_youtube.py --channel "$(CHANNEL)" --skip-existing $(if $(COOKIES_BROWSER),--cookies-from-browser $(COOKIES_BROWSER),)
 
 ingest-youtube-dry: ## Preview YouTube channel: make ingest-youtube-dry CHANNEL="..."
 	python tools/ingest_youtube.py --channel "$(CHANNEL)" --dry-run
 
-ingest-instagram: ## Ingest Instagram: make ingest-instagram USER=kinashyuriy
-	python tools/ingest_instagram.py --username "$(USER)" --skip-existing
-
-ingest-instagram-dry: ## Preview Instagram: make ingest-instagram-dry USER=kinashyuriy
+ingest-instagram-dry: ## Preview Instagram (Playwright): make ingest-instagram-dry USER=kinashyuriy
 	python tools/ingest_instagram.py --username "$(USER)" --dry-run
 
 ingest-yadisk: ## Ingest from Yandex Disk: make ingest-yadisk URL="https://disk.yandex.ru/d/XXX" NAME="folder name"

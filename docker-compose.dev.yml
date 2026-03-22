@@ -27,6 +27,7 @@ x-worker-volumes: &worker-volumes
   - ./data:/app/data
   - ./sessions:/app/sessions
   - ./services/ingestion-service/src:/app/src
+  - ./libs/common/src:/app/libs/common/src
 
 services:
   postgres:
