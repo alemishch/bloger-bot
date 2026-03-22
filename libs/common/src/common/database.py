@@ -15,6 +15,7 @@ def get_engine():
             echo=False,
             pool_size=5,
             max_overflow=10,
+            pool_pre_ping=True,
             # CRITICAL: disable prepared statement cache to avoid
             # InvalidCachedStatementError after schema changes
             connect_args={"prepared_statement_cache_size": 0},

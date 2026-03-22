@@ -1,13 +1,15 @@
 """
-Ingest Instagram posts using the logged-in Chrome browser session.
-Scrapes profile page via Selenium → extracts post text + reel URLs.
+Legacy Selenium scraper (Linux-oriented Chrome profile paths).
 
-This bypasses the Instagram API rate limits by using the real browser session.
+Prefer instead:
+
+- ``python tools/instagram_refresh_cookies.py`` → ``cookies/instagram.txt``
+- ``python tools/ingest_instagram.py --username …`` (instaloader + yt-dlp)
+
+This script is kept for reference only.
 
 Usage:
     python tools/ingest_instagram_browser.py --username kinashyuriy --dry-run
-    python tools/ingest_instagram_browser.py --username kinashyuriy --posts-only
-    python tools/ingest_instagram_browser.py --username kinashyuriy --max-scroll 20
 """
 import argparse
 import json

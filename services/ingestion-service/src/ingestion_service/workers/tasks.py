@@ -2,7 +2,6 @@ import asyncio
 import json
 import math
 import os
-import shutil
 import subprocess
 import structlog
 from typing import Optional
@@ -591,6 +590,14 @@ def label_item(self, content_item_id: str):
                 source_text = item.transcript_text or item.text if item else None
                 if not item or not source_text:
                     logger.warning("label_skip_no_text", item_id=content_item_id)
+                    return
+
+                if item.status != JobStatus.TRANSCRIBED:
+                    logger.info(
+                        "label_skip_wrong_status",
+                        item_id=content_item_id,
+                        status=item.status.value if item.status else None,
+                    )
                     return
 
                 await jm.update_item_status(item.id, JobStatus.LABELING)

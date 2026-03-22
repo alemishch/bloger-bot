@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.database import get_session
@@ -25,6 +25,12 @@ class SourceResponse(BaseModel):
     blogger_id: str
     is_active: bool
     last_parsed_message_id: Optional[int]
+    config: dict = Field(default_factory=dict)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def _config_dict(cls, v):
+        return v if isinstance(v, dict) else {}
 
     class Config:
         from_attributes = True

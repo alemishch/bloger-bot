@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import json
 import argparse
+import tarfile
 from datetime import datetime
 from pathlib import Path
 
@@ -100,7 +101,38 @@ def export_state(output_dir: str):
             print(f"   ⏭️  Skipped (too large). Copy manually if needed.\n")
             print(f"      rsync -av data/downloads/ {output}/downloads/\n")
 
-    # ── 6. Write manifest ──
+    # ── 6. Export ChromaDB (vector store) ──
+    print("6️⃣  Exporting ChromaDB...")
+    chroma_out = output / "chroma_backup.tar.gz"
+    try:
+        result = run("docker compose -f docker-compose.dev.yml ps -q chromadb")
+        container = (result.stdout or "").strip() if result.returncode == 0 else ""
+        if not container:
+            run("docker compose -f docker-compose.dev.yml up -d chromadb")
+            import time
+            time.sleep(3)
+            result = run("docker compose -f docker-compose.dev.yml ps -q chromadb")
+            container = (result.stdout or "").strip() if result.returncode == 0 else ""
+        if container:
+            chroma_export_dir = output / "_chroma_export_temp"
+            chroma_export_dir.mkdir(exist_ok=True)
+            run(f'docker cp "{container}:/chroma/chroma" "{chroma_export_dir}"')
+            # Tar the contents of chroma/ (chroma_export_dir/chroma)
+            inner = chroma_export_dir / "chroma"
+            if inner.exists():
+                with tarfile.open(chroma_out, "w:gz") as tf:
+                    tf.add(inner, arcname="chroma")
+                size_kb = chroma_out.stat().st_size // 1024
+                print(f"   ✅ ChromaDB backup: {size_kb} KB\n")
+            else:
+                print("   ⏭️  Chroma data dir empty, skipping\n")
+            shutil.rmtree(chroma_export_dir, ignore_errors=True)
+        else:
+            print("   ⏭️  Chromadb container not available, skipping\n")
+    except Exception as e:
+        print(f"   ⚠️  ChromaDB export failed: {e}\n")
+
+    # ── 7. Write manifest ──
     manifest = {
         "timestamp": timestamp,
         "exported_from": os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME", "unknown"),
@@ -109,6 +141,7 @@ def export_state(output_dir: str):
             "sessions": [f.name for f in sessions_dir.glob("*.session")],
             "transcriptions": len(list((output / "transcriptions").glob("*.json"))) if (output / "transcriptions").exists() else 0,
             "labeled": len(list((output / "labeled").glob("*.json"))) if (output / "labeled").exists() else 0,
+            "chroma_backup": str(chroma_out.name) if chroma_out.exists() else None,
         }
     }
     manifest_path = output / "manifest.json"

@@ -98,6 +98,16 @@ Options:
 - `--dry-run` – Only print what would be done.
 - `--no-import` – Only download to `.drive_sync_staging`; do not apply import.
 - `--yes-db` – Restore PostgreSQL without prompting.
+- `--overwrite-data` – When applying import, always replace files under `./data` from staging (default: only copy if staging file is newer).
+- `--from-staging` – Skip rclone; run import only from existing `.drive_sync_staging` (useful after a download or to retry DB/file copy).
+
+**Layout note:** `sync_to_drive` copies the same folders both at `transcriptions/` and `data/transcriptions/` (and the same for labeled/downloads). Pull previously only read the top-level folders, so if Drive had the canonical tree under `data/`, `./data` stayed stale. That is fixed; both layouts are merged into `./data/...`.
+
+**DB restore:** Before `DROP DATABASE`, the import scripts terminate other sessions on `bloger_bot` (so ingestion-service connections do not block restore). If restore still fails, stop dependent containers with `docker compose -f docker-compose.dev.yml stop` and run import again.
+
+**After DB restore:** Restart API and workers so they drop stale SQLAlchemy pools (otherwise you may see `connection is closed` / 500 on `POST /api/v1/sources/`):
+
+`docker compose -f docker-compose.dev.yml restart ingestion-service ingestion-worker ingestion-download-worker ingestion-transcription-worker`
 
 ---
 
