@@ -1,7 +1,7 @@
 # Build images with BuildKit GHA cache, push to GHCR, deploy over SSH on push to master.
 #
 # One-time setup (you):
-# 1. Server: Docker Engine + Compose v2; clone this repo to DEPLOY_PATH (default /opt/bloger-bot).
+# 1. Server: Docker Engine + Compose v2; clone this repo to DEPLOY_PATH (default /home/ubuntu/bloger-bot).
 # 2. Server: create .env (secrets, IMAGE_PREFIX=ghcr.io/<owner_lowercase>/bloger-bot — same value CI uses).
 # 3. GitHub → Settings → Secrets → Actions:
 #      SSH_HOST, SSH_USER, SSH_PRIVATE_KEY  (deploy key; OpenSSH format, full -----BEGIN…)
