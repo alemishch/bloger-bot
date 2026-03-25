@@ -1,0 +1,209 @@
+# Production stack: pre-built images only (built in CI), no source bind mounts.
+# On the server: clone repo, add .env (see deploy checklist in workflow / AGENTS.md), then deploy via CI or:
+#   docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d
+#
+# Required in .env on server:
+#   IMAGE_PREFIX=ghcr.io/<github_owner_lowercase>/bloger-bot   (no trailing slash)
+#   IMAGE_TAG=<commit_sha or latest>   # CI exports IMAGE_TAG per deploy
+#   POSTGRES_*, REDIS_*, OPENAI_API_KEY, TELEGRAM_*, ADMIN_PASSWORD, BLOGGER_ID, etc.
+# Optional:
+#   OUTBOUND_PROXY_URL=http://user:pass@host:port  → sets HTTP(S)_PROXY for external APIs only
+
+x-common-env: &common-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
+  POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
+  CHROMA_HOST: chromadb
+  CHROMA_PORT: "8000"
+  OPENAI_API_KEY: ${OPENAI_API_KEY}
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+# Standard proxy env: httpx / OpenAI / many HTTP clients honor HTTP_PROXY & HTTPS_PROXY.
+# NO_PROXY keeps traffic to Docker service names on the internal network direct.
+x-outbound-proxy: &outbound-proxy
+  HTTP_PROXY: ${OUTBOUND_PROXY_URL:-}
+  HTTPS_PROXY: ${OUTBOUND_PROXY_URL:-}
+  NO_PROXY: localhost,127.0.0.1,postgres,redis,chromadb,ingestion-service,user-service,admin-service,llm-service,telegram-bot-yuri
+
+x-worker-env: &worker-env
+  <<: [*common-env, *outbound-proxy]
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/2
+  TELEGRAM_API_ID: ${TELEGRAM_API_ID:-0}
+  TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+  TELEGRAM_SESSION_NAME: ${TELEGRAM_SESSION_NAME:-content_parser}
+  SESSIONS_DIR: /app/sessions
+  AUDIO_DIR: /app/data/audio
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bloger_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    restart: unless-stopped
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+
+  ingestion-service:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/ingestion-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *worker-env
+    volumes:
+      - ingestion_data:/app/data
+      - ingestion_sessions:/app/sessions
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ingestion-worker:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/ingestion-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=2 --queues=default --hostname=parse-worker@%h
+    environment:
+      <<: *worker-env
+    volumes:
+      - ingestion_data:/app/data
+      - ingestion_sessions:/app/sessions
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  ingestion-download-worker:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/ingestion-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=1 --queues=downloads --hostname=download-worker@%h
+    environment:
+      <<: *worker-env
+    volumes:
+      - ingestion_data:/app/data
+      - ingestion_sessions:/app/sessions
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  ingestion-transcription-worker:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/ingestion-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: celery -A ingestion_service.workers.celery_app worker --loglevel=info --concurrency=3 --queues=transcriptions --hostname=transcription-worker@%h
+    environment:
+      <<: *worker-env
+    volumes:
+      - ingestion_data:/app/data
+      - ingestion_sessions:/app/sessions
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  admin-service:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/admin-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["uvicorn", "admin_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+    ports:
+      - "127.0.0.1:${ADMIN_SERVICE_PORT:-8010}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  user-service:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/user-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["uvicorn", "user_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  llm-service:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/llm-service:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command: ["uvicorn", "llm_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *outbound-proxy
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      BLOGGER_ID: ${BLOGGER_ID:-yuri}
+    depends_on:
+      - chromadb
+
+  telegram-bot-yuri:
+    image: ${IMAGE_PREFIX:?set IMAGE_PREFIX}/telegram-bot:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      <<: *outbound-proxy
+      BLOGGER_ID: ${BLOGGER_ID:-yuri}
+      TELEGRAM_BOT_TOKEN_YURI: ${TELEGRAM_BOT_TOKEN_YURI:-}
+      LLM_SERVICE_URL: http://llm-service:8000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      llm-service:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  ingestion_data:
+  ingestion_sessions:

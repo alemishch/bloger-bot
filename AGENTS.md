@@ -69,6 +69,12 @@ Tables: `users`, `chat_sessions`, `chat_messages`, `onboarding_responses`, `cont
 - **Redis password**: Comes from env var at container creation time. Check actual password with `docker inspect workspace-redis-1 | grep requirepass`.
 - **Onboarding scenarios**: Defined in YAML (`config/onboarding/`). Swap by editing the YAML file — no code changes needed. Bot reads config at startup.
 
+### Production deploy
+
+- **Compose file**: `docker-compose.prod.yml` — no source bind mounts; images from GHCR. Internal DB/Redis/Chroma are not published to the host. Admin listens on `127.0.0.1:8010` (SSH tunnel or future reverse proxy).
+- **Server `.env`**: Set `IMAGE_PREFIX=ghcr.io/<github_owner_lowercase>/bloger-bot` (same prefix CI pushes to), `IMAGE_TAG` is set by the deploy script to the commit SHA. Include strong `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `OPENAI_API_KEY`, prod `TELEGRAM_BOT_TOKEN_YURI`, `TELEGRAM_*`, `ADMIN_PASSWORD`, optional `OUTBOUND_PROXY_URL` (sets `HTTP_PROXY`/`HTTPS_PROXY` with `NO_PROXY` for Docker service names).
+- **CI/CD**: `.github/workflows/deploy-production.yml` — on push to `master`, builds five images with BuildKit GHA cache, pushes to GHCR (`:latest` and `:<sha>`), SSHs to the server, `git pull`, `docker compose -f docker-compose.prod.yml pull`, runs Alembic via `ingestion-service`, then `up -d`. See comments at the top of the workflow for required GitHub secrets and one-time server setup (Docker, clone repo to `DEPLOY_PATH`, **Git access** for private repos e.g. deploy key).
+
 ### Lint / Format
 
 - `source .venv/bin/activate && ruff check .`

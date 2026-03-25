@@ -1,0 +1,135 @@
+# Build images with BuildKit GHA cache, push to GHCR, deploy over SSH on push to master.
+#
+# One-time setup (you):
+# 1. Server: Docker Engine + Compose v2; clone this repo to DEPLOY_PATH (default /opt/bloger-bot).
+# 2. Server: create .env (secrets, IMAGE_PREFIX=ghcr.io/<owner_lowercase>/bloger-bot — same value CI uses).
+# 3. GitHub → Settings → Secrets → Actions:
+#      SSH_HOST, SSH_USER, SSH_PRIVATE_KEY  (deploy key; OpenSSH format, full -----BEGIN…)
+#      GHCR_PULL_TOKEN  (optional if GHCR packages are public; else classic PAT with read:packages)
+#    Optional: SSH_PORT (default 22)
+# 4. Repo → Settings → Actions → General → Workflow permissions: enable "Read and write" (for GITHUB_TOKEN → GHCR push).
+# 5. First deploy: ensure server has run: echo TOKEN | docker login ghcr.io -u GITHUB_USERNAME --password-stdin
+#    (or rely on GHCR_PULL_TOKEN in the workflow — login runs each deploy.)
+#
+# If your default branch is `main`, change `branches: [master]` below.
+
+name: Deploy production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+env:
+  # Clone path on the server (override in this file if needed).
+  DEPLOY_PATH: /home/ubuntu/bloger-bot
+
+jobs:
+  build-push:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ingestion-service
+            dockerfile: services/ingestion-service/Dockerfile
+          - image: admin-service
+            dockerfile: services/admin-service/Dockerfile
+          - image: user-service
+            dockerfile: services/user-service/Dockerfile
+          - image: llm-service
+            dockerfile: services/llm-service/Dockerfile
+          - image: telegram-bot
+            dockerfile: services/telegram-bot/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase owner + image prefix
+        id: meta
+        run: |
+          o=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=${o}" >> "$GITHUB_OUTPUT"
+          echo "prefix=ghcr.io/${o}/bloger-bot" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.prefix }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.prefix }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    name: Deploy over SSH
+    runs-on: ubuntu-latest
+    needs: [build-push]
+
+    steps:
+      - name: Lowercase owner + image prefix
+        id: meta
+        run: |
+          o=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "prefix=ghcr.io/${o}/bloger-bot" >> "$GITHUB_OUTPUT"
+
+      - name: Add SSH known hosts
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -p "22" -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          IMAGE_PREFIX: ${{ steps.meta.outputs.prefix }}
+          GHCR_USER: ${{ github.repository_owner }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          envs: GHCR_TOKEN,GITHUB_SHA,IMAGE_PREFIX,GHCR_USER
+          script_stop: true
+          script: |
+            set -euo pipefail
+            o=$(echo "$GHCR_USER" | tr '[:upper:]' '[:lower:]')
+            if [ -n "${GHCR_TOKEN:-}" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$o" --password-stdin
+            fi
+            cd "${{ env.DEPLOY_PATH }}"
+            git fetch origin
+            git checkout master
+            git reset --hard "origin/master"
+            export IMAGE_PREFIX="$IMAGE_PREFIX"
+            export IMAGE_TAG="$GITHUB_SHA"
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml run --rm ingestion-service \
+              alembic -c /app/migrations/alembic.ini upgrade head
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
