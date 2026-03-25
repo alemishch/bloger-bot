@@ -8,6 +8,9 @@
 #   POSTGRES_*, REDIS_*, OPENAI_API_KEY, TELEGRAM_*, ADMIN_PASSWORD, BLOGGER_ID, etc.
 # Optional:
 #   OUTBOUND_PROXY_URL=http://user:pass@host:port  → sets HTTP(S)_PROXY for external APIs only
+#
+# Host ports (same defaults as dev Makefile / curl): ingestion 8002, llm 8003, user 8004, chroma 8000;
+# admin 127.0.0.1:8010. Override with INGESTION_SERVICE_PORT, LLM_SERVICE_PORT, etc. if needed.
 
 x-common-env: &common-env
   POSTGRES_HOST: postgres
@@ -72,6 +75,8 @@ services:
   chromadb:
     image: chromadb/chroma:0.5.23
     restart: unless-stopped
+    ports:
+      - "${CHROMA_HOST_PORT:-8000}:8000"
     volumes:
       - chroma_data:/chroma/chroma
     environment:
@@ -84,6 +89,8 @@ services:
     command: ["uvicorn", "ingestion_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       <<: *worker-env
+    ports:
+      - "${INGESTION_SERVICE_PORT:-8002}:8000"
     volumes:
       - ingestion_data:/app/data
       - ingestion_sessions:/app/sessions
@@ -148,7 +155,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
       POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
     ports:
       - "127.0.0.1:${ADMIN_SERVICE_PORT:-8010}:8000"
     depends_on:
@@ -165,6 +172,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-bloger_bot}
       POSTGRES_USER: ${POSTGRES_USER:-bloger_bot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${USER_SERVICE_PORT:-8004}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -179,6 +188,8 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       BLOGGER_ID: ${BLOGGER_ID:-yuri}
+    ports:
+      - "${LLM_SERVICE_PORT:-8003}:8000"
     depends_on:
       - chromadb
 

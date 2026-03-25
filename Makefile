@@ -13,61 +13,65 @@ else
   _PG_PASSWORD = $(shell grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)
 endif
 
+# Production: `make COMPOSE_FILE=docker-compose.prod.yml ps` (or export COMPOSE_FILE=...)
+COMPOSE_FILE ?= docker-compose.dev.yml
+DC := docker compose -f $(COMPOSE_FILE)
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
 # ── Docker ──
 up: ## Start all services
-	docker compose -f docker-compose.dev.yml up -d
+	$(DC) up -d
 
 up-infra: ## Start only infrastructure (postgres, redis, chromadb)
-	docker compose -f docker-compose.dev.yml up -d postgres redis chromadb
+	$(DC) up -d postgres redis chromadb
 
 down: ## Stop all services
-	docker compose -f docker-compose.dev.yml down
+	$(DC) down
 
 build: ## Build all Docker images
-	docker compose -f docker-compose.dev.yml build
+	$(DC) build
 
 logs: ## Follow all logs
-	docker compose -f docker-compose.dev.yml logs -f
+	$(DC) logs -f
 
 logs-worker: ## Follow ingestion worker logs
-	docker compose -f docker-compose.dev.yml logs -f ingestion-worker
+	$(DC) logs -f ingestion-worker
 
 ps: ## Show running services
-	docker compose -f docker-compose.dev.yml ps
+	$(DC) ps
 
 # ── Database / Migrations ──
 migrate: ## Run database migrations
-	docker compose -f docker-compose.dev.yml exec ingestion-service \
+	$(DC) exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini upgrade head
 
 migrate-create: ## Create migration: make migrate-create MSG="add users table"
-	docker compose -f docker-compose.dev.yml exec ingestion-service \
+	$(DC) exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini revision --autogenerate -m "$(MSG)"
 
 migrate-down: ## Rollback last migration
-	docker compose -f docker-compose.dev.yml exec ingestion-service \
+	$(DC) exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini downgrade -1
 
 migrate-current: ## Show current migration state
-	docker compose -f docker-compose.dev.yml exec ingestion-service \
+	$(DC) exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini current
 
 migrate-history: ## Show migration history
-	docker compose -f docker-compose.dev.yml exec ingestion-service \
+	$(DC) exec ingestion-service \
 		alembic -c /app/migrations/alembic.ini history
 
 
 db-dump: ## Quick DB dump to file
-	docker compose -f docker-compose.dev.yml exec postgres \
+	$(DC) exec postgres \
 		pg_dump -U $${POSTGRES_USER:-bloger_bot} $${POSTGRES_DB:-bloger_bot} \
 		> backup_$(_TIMESTAMP).sql
 	@echo "✅ Dumped"
 
 db-restore: ## Restore DB: make db-restore FILE=backup.sql
-	docker compose -f docker-compose.dev.yml exec -T postgres \
+	$(DC) exec -T postgres \
 		psql -U $${POSTGRES_USER:-bloger_bot} $${POSTGRES_DB:-bloger_bot} < $(FILE)
 	@echo "✅ Restored from $(FILE)"
 
@@ -142,7 +146,7 @@ retry-failed: ## Retry all download_failed items
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/retry-failed-downloads?limit=500" | python -m json.tool
 
 logs-transcription-worker: ## Follow transcription worker logs
-	docker compose -f docker-compose.dev.yml logs -f ingestion-transcription-worker
+	$(DC) logs -f ingestion-transcription-worker
 
 stats-watch: ## Watch pipeline stats every 15s
 ifeq ($(OS),Windows_NT)
