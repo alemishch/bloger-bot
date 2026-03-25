@@ -156,7 +156,13 @@ RAG-движок для ответов на вопросы и анализа п�
 **Ответ:**
 ```json
 {
-  "analysis": "Я внимательно изучил ваши ответы...",
+  "analysis_message": "Я внимательно изучил ваши ответы... (зоны, гипотезы, опора на контент Юрия)",
+  "profile_update": {
+    "communication_style": "неформально",
+    "topics_of_interest": ["усталость", "ЖКТ"]
+  },
+  "pending_question": "Один уточняющий вопрос или null",
+  "confidence": 0.72,
   "usage": {"prompt_tokens": 1000, "completion_tokens": 300}
 }
 ```

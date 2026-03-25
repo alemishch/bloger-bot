@@ -99,14 +99,37 @@ async def _run_analysis(target_message: Message, telegram_id: int, name: str):
             user_name=name,
         )
 
-        analysis = result.get("analysis", "")
-        if len(analysis) > 4000:
-            parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
+        analysis_message = result.get("analysis_message") or result.get("analysis") or ""
+        pending_question = result.get("pending_question")
+        profile_update = result.get("profile_update") or {}
+
+        user_state = await get_user_state(telegram_id)
+        session_id = ""
+        if user_state and analysis_message:
+            # Создаём сессию заранее, чтобы follow-up после уточняющего вопроса имел контекст.
+            session_id = await get_or_create_session(telegram_id, settings.BLOGGER_ID)
+            if session_id:
+                await save_chat_message(
+                    user_id=user_state["id"],
+                    session_id=session_id,
+                    role="assistant",
+                    content=analysis_message,
+                )
+            if profile_update:
+                await update_long_term_profile(telegram_id, profile_update)
+
+        if len(analysis_message) > 4000:
+            parts = [analysis_message[i:i+4000] for i in range(0, len(analysis_message), 4000)]
             await thinking.edit_text(parts[0])
             for part in parts[1:]:
                 await target_message.answer(part)
         else:
-            await thinking.edit_text(analysis)
+            await thinking.edit_text(analysis_message)
+
+        if pending_question:
+            await target_message.answer(
+                "➡️ Ответь на вопрос выше одной фразой — и я продолжу разбор по твоим данным.\n"
+            )
 
         await target_message.answer(
             "💬 Теперь ты можешь задать мне любой вопрос — я подберу ответ из базы знаний Юрия.\n\n"

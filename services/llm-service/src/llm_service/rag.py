@@ -48,11 +48,26 @@ async def rag_answer(
 
     context_pieces = []
     for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
-        sim = 1 - dist
         snippet = (doc or "").strip()
         if len(snippet) < 10:
             continue
-        context_pieces.append(f"[{i}] {snippet}")
+
+        meta = meta or {}
+        meta_parts: list[str] = []
+        if meta.get("content_type"):
+            meta_parts.append(str(meta.get("content_type")))
+        if meta.get("tags"):
+            meta_parts.append(f"tags:{str(meta.get('tags'))[:80]}")
+        if meta.get("summary"):
+            meta_parts.append(f"summary:{str(meta.get('summary'))[:160]}")
+        if meta.get("item_id"):
+            # Референс для будущего плеера: фронт сопоставит ref с карточкой контента.
+            meta_parts.append(f"ref:{blogger_id}:{meta.get('item_id')}:{meta.get('chunk_index', '?')}")
+        if meta.get("source_message_id"):
+            meta_parts.append(f"source_msg:{meta.get('source_message_id')}")
+
+        meta_label = " | ".join(meta_parts)
+        context_pieces.append(f"[{i}] {meta_label}\n{snippet}")
 
     context_text = "\n\n".join(context_pieces)[:max_context_chars]
 
@@ -67,7 +82,26 @@ async def rag_answer(
         for msg in chat_history[-10:]:
             messages.append(msg)
 
-    user_prompt = f"Вопрос: {query}"
+    pending_question = None
+    if chat_history:
+        # Ищем последний уточняющий вопрос из предыдущего сообщения ассистента.
+        for msg in reversed(chat_history):
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), str):
+                content = msg.get("content")
+                marker = "Уточняющий вопрос:"
+                if marker in content:
+                    # Делаем мягкий парсинг — просто берём всё после маркера.
+                    pending_question = content.split(marker, 1)[1].strip().splitlines()[0]
+                    break
+
+    if pending_question:
+        user_prompt = (
+            "СЦЕНАРИЙ: это ответ на уточняющий вопрос из предыдущего сообщения.\n"
+            f"Уточняющий вопрос: {pending_question}\n"
+            f"Ответ пользователя: {query}"
+        )
+    else:
+        user_prompt = f"Вопрос: {query}"
     if context_text:
         user_prompt += f"\n\nКонтекст из базы знаний:\n{context_text}"
     user_prompt += f"\n\n{disclaimer}\n\nОтветь на вопрос, опираясь на контекст."
@@ -120,31 +154,122 @@ async def analyze_onboarding(
     openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
     collection = get_chroma_collection(blogger_id)
-    symptoms = [r.get("answer_value", "") for r in responses if r.get("step_id") == "symptoms"]
-    symptom_query = " ".join(symptoms) if symptoms else "психосоматика здоровье"
+    # Retrieval по всему профилю анкеты — чтобы гипотезы не были “только про симптомы”.
+    answer_query_parts: list[str] = []
+    for r in responses:
+        sid = r.get("step_id", "")
+        aval = r.get("answer_value", "")
+        if aval:
+            answer_query_parts.append(f"{sid}: {aval}")
+    answer_query = " ".join(answer_query_parts).strip()[:1200] or "психосоматика здоровье"
 
-    emb = await openai_client.embeddings.create(model=settings.EMBED_MODEL, input=symptom_query)
-    results = collection.query(query_embeddings=[emb.data[0].embedding], n_results=5, include=["documents"])
-    context = "\n".join(results["documents"][0][:3]) if results["documents"] else ""
+    emb = await openai_client.embeddings.create(model=settings.EMBED_MODEL, input=answer_query)
+    results = collection.query(
+        query_embeddings=[emb.data[0].embedding],
+        n_results=8,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    docs = results["documents"][0] if results["documents"] else []
+    metas = results["metadatas"][0] if results["metadatas"] else []
+    distances = results["distances"][0] if results["distances"] else []
+
+    context_pieces: list[str] = []
+    for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
+        snippet = (doc or "").strip()
+        if len(snippet) < 30:
+            continue
+
+        meta = meta or {}
+        meta_parts: list[str] = []
+        if meta.get("content_type"):
+            meta_parts.append(str(meta.get("content_type")))
+        if meta.get("tags"):
+            meta_parts.append(f"tags:{str(meta.get('tags'))[:70]}")
+        if meta.get("summary"):
+            meta_parts.append(f"summary:{str(meta.get('summary'))[:140]}")
+        if meta.get("item_id"):
+            meta_parts.append(f"ref:{blogger_id}:{meta.get('item_id')}:{meta.get('chunk_index', '?')}")
+        if meta.get("source_message_id"):
+            meta_parts.append(f"source_msg:{meta.get('source_message_id')}")
+        meta_label = " | ".join(meta_parts)
+
+        # Сохраняем индексы — модель должна ссылаться на них в ответе.
+        context_pieces.append(f"[{i}] {meta_label}\n{snippet}")
+
+    context = "\n\n".join(context_pieces)[:3000]
+
+    # Доп. ограничения, чтобы LLM не уходил в “капитан очевидность”.
+    # Эти требования должны выполняться даже если `analysis_prompt` в конфиге будет неполным.
+    strict_rules = (
+        "ФОРМАТ ОТВЕТА: верни ТОЛЬКО валидный JSON без markdown.\n"
+        "JSON должен содержать ключи:\n"
+        "- analysis_message: string (текст, который бот отправит пользователю)\n"
+        "- profile_update: object (JSON для users.long_term_profile)\n"
+        "- pending_question: string или null\n"
+        "- confidence: число от 0 до 1\n"
+        "\n"
+        "profile_update заполни так (если данные отсутствуют — ставь пустые значения/{}):\n"
+        "- communication_style (коротко: формально/неформально, предпочитает короткие/развёрнутые ответы)\n"
+        "- goals (если пользователь явно говорил “хочу”, “мне нужно” — иначе пусто)\n"
+        "- topics_of_interest (массив строк: например anxiety, gut, sleep, weight, pain)\n"
+        "- reactions (объект: только явные позитив/негатив сигналы; иначе пусто)\n"
+        "- last_session_summary (3–5 предложений: что понял бот, 1–3 зоны, почему это важно)\n"
+        "ТРЕБОВАНИЯ К analysis_message:\n"
+        "- Говори от первого лица ('я'), НЕ используй фразы вида “Юрий говорит/у Юрия/как говорит Юрий”.\n"
+        "- НЕ пересказывай ответы пользователя дословно и не используй банальные формулы уровня “у тебя стресс”.\n"
+        "- Выдели 1–3 проблемные зоны и к каждой 1–2 гипотезы (роль эксперта).\n"
+        "- Опора на контент делается редко и только если усиливает гипотезы.\n"
+        "  Вместо цитат давай референсы в формате поля `ref:` из CONTEXT: “Ссылка на материал: ref:...”.\n"
+        "  Максимум 0–2 ссылки. Без длинных дословных цитат.\n"
+        "- Либо: при confidence низкой (<=0.4) в конце добавь одну строку:\n"
+        "  “Уточняющий вопрос: ...” (и НЕ предлагай задания/упражнения).\n"
+        "- Либо: при confidence высокой (>0.4) в конце добавь одну строку:\n"
+        "  “Ближайший шаг: ...” (обычно самоисследование; если это материал — максимум 1 ссылка, без цитат).\n"
+        "- В конце не добавляй второе уточнение.\n"
+    )
 
     messages = [
-        {"role": "system", "content": system_prompt + "\n\n" + analysis_prompt},
+        {"role": "system", "content": system_prompt + "\n\n" + analysis_prompt + "\n\n" + strict_rules},
         {"role": "user", "content": (
             f"Имя пользователя: {name}\n\n"
             f"Ответы из онбординга:\n{responses_text}\n\n"
-            f"Релевантный контекст из базы знаний:\n{context[:3000]}\n\n"
-            f"Проанализируй и дай результат по структуре."
+            f"CONTEXT из базы знаний (используй индексы [n] как источники):\n{context}\n\n"
+            f"Проанализируй и дай результат по структуре. Confidence оцени как честную уверенность по данным анкеты."
         )},
     ]
 
     resp = await openai_client.chat.completions.create(
-        model=settings.CHAT_MODEL, messages=messages,
-        temperature=0.4, max_tokens=2000,
+        model=settings.CHAT_MODEL,
+        messages=messages,
+        temperature=0.35,
+        max_tokens=2000,
+        response_format={"type": "json_object"},
     )
 
-    answer = resp.choices[0].message.content.strip()
+    import json as _json
+
+    try:
+        payload = _json.loads(resp.choices[0].message.content)
+    except _json.JSONDecodeError:
+        payload = {
+            "analysis_message": resp.choices[0].message.content.strip(),
+            "profile_update": {},
+            "pending_question": None,
+            "confidence": 0.2,
+        }
+
+    analysis_message = payload.get("analysis_message") or payload.get("analysis") or ""
+    pending_question = payload.get("pending_question")
+
     return {
-        "analysis": answer,
+        # Новая структура (используется telegram-bot).
+        "analysis_message": analysis_message,
+        "pending_question": pending_question,
+        "confidence": payload.get("confidence", 0.0),
+        "profile_update": payload.get("profile_update", {}),
+        # Бэкап поле для совместимости со старым кодом.
+        "analysis": analysis_message,
         "usage": {
             "prompt_tokens": resp.usage.prompt_tokens,
             "completion_tokens": resp.usage.completion_tokens,
