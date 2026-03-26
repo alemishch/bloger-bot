@@ -89,6 +89,7 @@ def apply_import(
         if include_downloads_override is None
         else include_downloads_override
     )
+    compose_file = config.get("docker_compose_file", "docker-compose.dev.yml")
 
     def should_copy(src_file: Path, dest_file: Path) -> bool:
         if overwrite_data:
@@ -104,19 +105,19 @@ def apply_import(
                 print("   ⏭️  Skipped DB restore\n")
             else:
                 run(
-                    'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = \'bloger_bot\' AND pid <> pg_backend_pid();"',
+                    f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = \'bloger_bot\' AND pid <> pg_backend_pid();"',
                     dry_run=dry_run,
                 )
                 run(
-                    'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "DROP DATABASE IF EXISTS bloger_bot;"',
+                    f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "DROP DATABASE IF EXISTS bloger_bot;"',
                     dry_run=dry_run,
                 )
                 run(
-                    'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "CREATE DATABASE bloger_bot;"',
+                    f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "CREATE DATABASE bloger_bot;"',
                     dry_run=dry_run,
                 )
                 run(
-                    f'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d bloger_bot < "{db_dump}"',
+                    f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d bloger_bot < "{db_dump}"',
                     check=False,
                     dry_run=dry_run,
                 )
@@ -125,19 +126,19 @@ def apply_import(
             print("   (dry-run) Would restore DB\n")
         else:
             run(
-                'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = \'bloger_bot\' AND pid <> pg_backend_pid();"',
+                f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = \'bloger_bot\' AND pid <> pg_backend_pid();"',
                 dry_run=dry_run,
             )
             run(
-                'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "DROP DATABASE IF EXISTS bloger_bot;"',
+                f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "DROP DATABASE IF EXISTS bloger_bot;"',
                 dry_run=dry_run,
             )
             run(
-                'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d postgres -c "CREATE DATABASE bloger_bot;"',
+                f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d postgres -c "CREATE DATABASE bloger_bot;"',
                 dry_run=dry_run,
             )
             run(
-                f'docker compose -f docker-compose.dev.yml exec -T postgres psql -U bloger_bot -d bloger_bot < "{db_dump}"',
+                f'docker compose -f "{compose_file}" exec -T postgres psql -U bloger_bot -d bloger_bot < "{db_dump}"',
                 check=False,
                 dry_run=dry_run,
             )
@@ -250,10 +251,10 @@ def apply_import(
             _chroma = importlib.util.module_from_spec(_spec)
             assert _spec.loader
             _spec.loader.exec_module(_chroma)
-            compose_file = config.get("docker_compose_file", "docker-compose.dev.yml")
+            _cf = config.get("docker_compose_file", "docker-compose.dev.yml")
             ok = _chroma.import_chroma_volume(
                 repo_root,
-                compose_file,
+                _cf,
                 chroma_src,
                 dry_run=dry_run,
             )

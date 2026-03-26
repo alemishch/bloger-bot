@@ -83,6 +83,7 @@ def build_staging(
     """Build staging directory with all paths to sync (same layout as export_state + extra paths)."""
     staging.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    compose_file = config.get("docker_compose_file", "docker-compose.dev.yml")
 
     # ── 1. PostgreSQL dump ──
     if config.get("include_postgres_dump", True) and not skip_db:
@@ -90,7 +91,7 @@ def build_staging(
         db_dump = staging / "postgres_dump.sql"
         if not dry_run:
             run(
-                f'docker compose -f docker-compose.dev.yml exec -T postgres '
+                f'docker compose -f "{compose_file}" exec -T postgres '
                 f'pg_dump -U bloger_bot bloger_bot > "{db_dump}"',
                 check=False,
                 dry_run=dry_run,
