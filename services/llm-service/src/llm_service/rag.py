@@ -7,12 +7,15 @@ from llm_service.config import settings, load_blogger_config
 
 logger = structlog.get_logger()
 
+SOURCE_TEXT_PREVIEW_CHARS = 1000
+
 
 def get_chroma_collection(blogger_id: str):
+    """Open existing Chroma collection (do not create empty — that hides misconfig)."""
     cfg = load_blogger_config(blogger_id)
     client = chromadb.HttpClient(host=settings.CHROMA_HOST, port=settings.CHROMA_PORT)
     collection_name = cfg.get("chroma_collection", f"blogger_{blogger_id}")
-    return client.get_or_create_collection(name=collection_name)
+    return client.get_collection(name=collection_name)
 
 
 async def rag_answer(
@@ -36,6 +39,9 @@ async def rag_answer(
     query_embedding = emb_resp.data[0].embedding
 
     collection = get_chroma_collection(blogger_id)
+    collection_name = cfg.get("chroma_collection", f"blogger_{blogger_id}")
+    chroma_count = collection.count()
+
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=top_k,
@@ -45,14 +51,26 @@ async def rag_answer(
     docs = results["documents"][0] if results["documents"] else []
     metas = results["metadatas"][0] if results["metadatas"] else []
     distances = results["distances"][0] if results["distances"] else []
+    row_ids = results["ids"][0] if results.get("ids") else []
 
     context_pieces = []
-    for i, (doc, meta, dist) in enumerate(zip(docs, metas, distances), 1):
+    sources: list[dict] = []
+    ctx_idx = 0
+    pairs = zip(docs, metas, distances, row_ids or [None] * len(docs))
+    for doc, meta, dist, chroma_id in pairs:
         snippet = (doc or "").strip()
         if len(snippet) < 10:
             continue
 
+        ctx_idx += 1
         meta = meta or {}
+        item_id = meta.get("item_id")
+        chunk_index = meta.get("chunk_index")
+        idx_display = chunk_index if chunk_index is not None else "?"
+        ref = (
+            f"ref:{blogger_id}:{item_id}:{idx_display}" if item_id is not None else ""
+        )
+
         meta_parts: list[str] = []
         if meta.get("content_type"):
             meta_parts.append(str(meta.get("content_type")))
@@ -60,16 +78,38 @@ async def rag_answer(
             meta_parts.append(f"tags:{str(meta.get('tags'))[:80]}")
         if meta.get("summary"):
             meta_parts.append(f"summary:{str(meta.get('summary'))[:160]}")
-        if meta.get("item_id"):
-            # Референс для будущего плеера: фронт сопоставит ref с карточкой контента.
-            meta_parts.append(f"ref:{blogger_id}:{meta.get('item_id')}:{meta.get('chunk_index', '?')}")
+        if item_id is not None:
+            meta_parts.append(ref)
         if meta.get("source_message_id"):
             meta_parts.append(f"source_msg:{meta.get('source_message_id')}")
 
         meta_label = " | ".join(meta_parts)
-        context_pieces.append(f"[{i}] {meta_label}\n{snippet}")
+        context_pieces.append(f"[{ctx_idx}] {meta_label}\n{snippet}")
+
+        sim = round(1 - dist, 3)
+        preview = snippet[:SOURCE_TEXT_PREVIEW_CHARS]
+        src: dict = {
+            "id": chroma_id,
+            "similarity": sim,
+            "text": preview,
+            "item_id": str(item_id) if item_id is not None else None,
+            "chunk_index": int(chunk_index) if chunk_index is not None else None,
+            "ref": ref,
+            "chunk": preview[:200],
+        }
+        sources.append(src)
 
     context_text = "\n\n".join(context_pieces)[:max_context_chars]
+
+    if not context_pieces:
+        logger.warning(
+            "rag_no_context",
+            blogger=blogger_id,
+            collection=collection_name,
+            chroma_count=chroma_count,
+            raw_docs=len(docs),
+            query_len=len(query),
+        )
 
     profile_block = ""
     if user_profile:
@@ -126,11 +166,13 @@ async def rag_answer(
 
     return {
         "answer": answer,
-        "sources": [
-            {"chunk": doc[:200], "similarity": round(1 - dist, 3)}
-            for doc, dist in zip(docs[:3], distances[:3])
-        ],
+        "sources": sources,
         "usage": usage,
+        "retrieval": {
+            "chroma_collection": collection_name,
+            "chroma_document_count": chroma_count,
+            "chunks_in_context": len(context_pieces),
+        },
     }
 
 

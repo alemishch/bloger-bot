@@ -3,11 +3,11 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from common.database import get_session
 from common.models.content import ContentItem
-from common.models.enums import JobStatus, ContentType
+from common.models.enums import BloggerID, JobStatus, ContentType
 from ingestion_service.services.job_manager import JobManager
 
 router = APIRouter()
@@ -369,3 +369,51 @@ async def queue_labeled_for_vectorization(
     for item in items:
         vectorize_item.delay(str(item.id))
     return {"reset_chunking": len(stuck_items), "queued": len(items)}
+
+
+@router.post("/queue-revectorize-ready")
+async def queue_revectorize_ready(
+    limit: int = Query(5000, le=20000),
+    blogger_id: Optional[str] = Query(
+        None,
+        description="If set, only items for this blogger (e.g. yuri)",
+    ),
+    session: AsyncSession = Depends(get_session),
+):
+    """Re-run vectorization for items already ``ready`` (re-upsert into Chroma).
+
+    Use after Chroma volume was wiped or replaced while Postgres still shows ``ready``.
+    Each task re-chunks, embeds, and upserts; status goes chunking → ready again.
+    """
+    from ingestion_service.workers.tasks import vectorize_item
+
+    has_text = or_(
+        func.coalesce(func.length(ContentItem.transcript_text), 0) > 0,
+        func.coalesce(func.length(ContentItem.text), 0) > 0,
+    )
+    q = (
+        select(ContentItem)
+        .where(ContentItem.status == JobStatus.READY, has_text)
+        .order_by(ContentItem.created_at)
+        .limit(limit)
+    )
+    if blogger_id:
+        try:
+            bid = BloggerID(blogger_id.lower())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid blogger_id. Valid: {[e.value for e in BloggerID]}",
+            )
+        q = q.where(ContentItem.blogger_id == bid)
+
+    result = await session.execute(q)
+    items = list(result.scalars().all())
+    for item in items:
+        vectorize_item.delay(str(item.id))
+    return {
+        "queued": len(items),
+        "limit": limit,
+        "blogger_id": blogger_id,
+        "note": "Ensure ingestion-worker is running (Celery queue default).",
+    }

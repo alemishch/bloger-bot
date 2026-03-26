@@ -1,5 +1,5 @@
 .PHONY: help up down build logs ps migrate migrate-create migrate-down \
-		up-infra parse pipeline-stats list-items create-source \
+		up-infra parse pipeline-stats list-items create-source revectorize-ready \
 		transcriber-install transcribe-file transcribe-process transcribe-watch transcribe-status \
 		export-state export-state-to import-state db-dump db-restore health lint format \
 		youtube-cookies instagram-cookies ingest-youtube ingest-youtube-dry ingest-instagram
@@ -166,6 +166,9 @@ recover-all: ## Recover ALL stuck/failed items in one shot
 
 queue-labeled: ## Queue all labeled items for vectorization (fixes stuck chunking)
 	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-labeled?limit=1000" | python3 -m json.tool
+
+revectorize-ready: ## Re-upsert ``ready`` items into Chroma (after empty chroma volume). Needs ingestion-worker up.
+	curl -s -X POST "http://localhost:8002/api/v1/jobs/queue-revectorize-ready?limit=20000" | python -m json.tool
 
 parse-text: ## Parse text posts: make parse-text SOURCE_ID=<uuid>
 	curl -s -X POST "http://localhost:8002/api/v1/sources/$(SOURCE_ID)/parse-text?max_messages=0" | python3 -m json.tool

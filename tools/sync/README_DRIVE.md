@@ -72,14 +72,19 @@ python tools/sync/sync_to_drive.py
 This will:
 
 1. Dump PostgreSQL (if Docker is running) into the sync bundle.
-2. Copy session files (`.session`), `sessions/`, `data/transcriptions`, `data/labeled`, `data/downloads` (if &lt; 10 GB), `data/audio`, `data/exports`, `data/rag`, and any vector DB dirs (e.g. `chroma_db`, `vector_store`) into a staging dir.
-3. Upload the staging dir to `gdrive:bloger-bot-sync` with rclone.
+2. Copy session files (`.session`), `sessions/`, `data/transcriptions`, `data/labeled`, extra paths from `drive_sync_config.json` (exports, RAG JSON, legacy vector dirs if present).
+3. **Snapshot the Docker Chroma volume** (`chromadb` service → `chroma_docker_volume/` in staging) so embeddings travel with the bundle (requires `docker compose up -d chromadb`).
+4. Upload the staging dir to `gdrive:bloger-bot-sync` with **`rclone sync`** (files removed from staging are **removed on Drive** on the next push).
+
+**`data/downloads` is not synced by default** (large video/audio). Set `"include_downloads": true` in `drive_sync_config.json` or pass `--include-downloads` once if you really need it.
 
 Options:
 
 - `--dry-run` – Only build staging and print the rclone command (no upload).
 - `--skip-db` – Do not dump PostgreSQL.
-- `--max-downloads-gb 5` – Skip copying `data/downloads` if larger than 5 GB (default 10).
+- `--include-downloads` – Copy `data/downloads` into staging (still subject to `--max-downloads-gb` when enabled in config).
+- `--max-downloads-gb 5` – When downloads are enabled, skip copying `data/downloads` if larger than 5 GB (default 10).
+- `--skip-chroma` – Omit the Docker Chroma volume export step.
 - `--keep-staging` – Leave `.drive_sync_staging` after upload (for debugging).
 
 ### Pull from Google Drive (on cloud agent or new machine)
@@ -91,7 +96,8 @@ python tools/sync/sync_from_drive.py
 This will:
 
 1. Download `gdrive:bloger-bot-sync` into `.drive_sync_staging`.
-2. Restore DB (with confirmation), copy sessions, transcriptions, labeled, downloads, and extra paths into the repo.
+2. Restore DB (with confirmation), copy sessions, transcriptions, labeled, optional downloads, extra paths into the repo.
+3. **Import the Chroma snapshot** into the Docker `chromadb` named volume (stops `chromadb`, wipes volume contents, copies `chroma_docker_volume/`, starts `chromadb` again). Uses a short `alpine` container to clear the volume; requires Docker.
 
 Options:
 
@@ -100,6 +106,8 @@ Options:
 - `--yes-db` – Restore PostgreSQL without prompting.
 - `--overwrite-data` – When applying import, always replace files under `./data` from staging (default: only copy if staging file is newer).
 - `--from-staging` – Skip rclone; run import only from existing `.drive_sync_staging` (useful after a download or to retry DB/file copy).
+- `--include-downloads` – Restore `data/downloads` from staging even when config keeps downloads off.
+- `--skip-chroma-import` – Do not replace the Docker Chroma volume (e.g. you only want Postgres + transcripts).
 
 **Layout note:** `sync_to_drive` copies the same folders both at `transcriptions/` and `data/transcriptions/` (and the same for labeled/downloads). Pull previously only read the top-level folders, so if Drive had the canonical tree under `data/`, `./data` stayed stale. That is fixed; both layouts are merged into `./data/...`.
 
@@ -109,16 +117,26 @@ Options:
 
 `docker compose -f docker-compose.dev.yml restart ingestion-service ingestion-worker ingestion-download-worker ingestion-transcription-worker`
 
+**After Chroma import:** Restart consumers so they reconnect to the DB-backed index:
+
+`docker compose -f docker-compose.dev.yml restart chromadb llm-service telegram-bot-yuri`
+
 ---
 
 ## What gets synced
 
-Synced (aligned with gitignore / export):
+Configured in `tools/sync/drive_sync_config.json`:
 
 - PostgreSQL dump
 - `*.session` and `sessions/`
-- `data/transcriptions`, `data/labeled`, `data/downloads` (optional, size-limited), `data/audio`, `data/exports`, `data/rag`
-- `chroma_db`, `vector_store`, `chromadb`, `qdrant_storage` (if present)
+- `data/transcriptions`, `data/labeled`, `data/exports`, `data/rag`, other `paths` entries if the folders exist
+- **`chroma_docker_volume/`** – snapshot of the **Docker** Chroma data directory (`chromadb:/chroma/chroma`), not the optional repo folders `chroma_db` / `vector_store` (those are still copied only if present on disk)
+
+**Videos / `data/downloads`:**
+
+- Default **`include_downloads`: false** — **no** upload or download of `data/downloads`, so large media are not pushed to Drive.
+- **`rclone sync`** deletes remote files that disappear from staging. After one push **without** `downloads/` in staging, any old **`downloads/` tree on Google Drive (e.g. three videos) is removed** automatically.
+- To opt in temporarily: `"include_downloads": true` or `--include-downloads` on push/pull.
 
 **Not synced (on purpose):**
 

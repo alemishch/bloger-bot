@@ -79,8 +79,16 @@ def apply_import(
     confirm_db: bool = True,
     dry_run: bool = False,
     overwrite_data: bool = False,
+    include_downloads_override: bool | None = None,
+    skip_chroma_import: bool = False,
 ):
     """Apply imported state (same logic as import_state.py)."""
+    config = load_config(repo_root)
+    include_downloads = (
+        bool(config.get("include_downloads", False))
+        if include_downloads_override is None
+        else include_downloads_override
+    )
 
     def should_copy(src_file: Path, dest_file: Path) -> bool:
         if overwrite_data:
@@ -184,9 +192,11 @@ def apply_import(
     else:
         print("4️⃣  ⏭️  No labeled data\n")
 
-    # ── 5. Downloads ──
+    # ── 5. Downloads (optional — default off to avoid large video sync)
     dl_roots = _staging_subdirs(source, "downloads")
-    if dl_roots:
+    if not include_downloads:
+        print("5️⃣  ⏭️  Downloads skipped (include_downloads=false in drive_sync_config.json)\n")
+    elif dl_roots:
         print("5️⃣  Copying downloads...")
         downloads_dst = repo_root / "data" / "downloads"
         downloads_dst.mkdir(parents=True, exist_ok=True)
@@ -202,10 +212,9 @@ def apply_import(
                         copied += 1
         print(f"   ✅ {copied} files (from {len(dl_roots)} tree(s))\n")
     else:
-        print("5️⃣  ⏭️  No downloads\n")
+        print("5️⃣  ⏭️  No downloads in staging\n")
 
     # ── 6. Extra paths from config (data/audio, data/exports, transcripts, etc.) ──
-    config = load_config(repo_root)
     extra_paths = config.get("paths", [])
     # Do not skip data/transcriptions|labeled|downloads: sync_to_drive also copies them under data/
     # via these paths; import from staging root alone missed .drive_sync_staging/data/...
@@ -226,6 +235,35 @@ def apply_import(
                         shutil.copy2(f, d)
         print(f"   ✅ {rel}\n")
 
+    # ── 7. Docker Chroma volume (from staging snapshot) ──
+    if skip_chroma_import:
+        print("▶  ⏭️  Chroma import skipped (--skip-chroma-import)\n")
+    elif config.get("include_docker_chroma", True):
+        sub = config.get("staging_chroma_subdir", "chroma_docker_volume")
+        chroma_src = source / sub
+        if chroma_src.is_dir() and (dry_run or any(chroma_src.iterdir())):
+            print(f"▶  Importing Docker Chroma volume from {sub}/ ...")
+            import importlib.util
+
+            _cd_path = repo_root / "tools" / "sync" / "chroma_docker.py"
+            _spec = importlib.util.spec_from_file_location("_chroma_docker", _cd_path)
+            _chroma = importlib.util.module_from_spec(_spec)
+            assert _spec.loader
+            _spec.loader.exec_module(_chroma)
+            compose_file = config.get("docker_compose_file", "docker-compose.dev.yml")
+            ok = _chroma.import_chroma_volume(
+                repo_root,
+                compose_file,
+                chroma_src,
+                dry_run=dry_run,
+            )
+            if ok or dry_run:
+                print("   ✅ Chroma volume updated (restart llm-service / chromadb if already running)\n")
+        else:
+            print("▶  ⏭️  No Chroma snapshot in staging (folder missing or empty)\n")
+    else:
+        print("▶  ⏭️  Docker Chroma import disabled in config\n")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Pull project state from Google Drive.")
@@ -241,6 +279,16 @@ def main():
         "--from-staging",
         action="store_true",
         help="Skip rclone; apply import from existing .drive_sync_staging (no download).",
+    )
+    parser.add_argument(
+        "--include-downloads",
+        action="store_true",
+        help="Copy data/downloads from staging even if config has include_downloads false.",
+    )
+    parser.add_argument(
+        "--skip-chroma-import",
+        action="store_true",
+        help="Do not replace Docker Chroma volume from staging/chroma_docker_volume.",
     )
     args = parser.parse_args()
 
@@ -263,6 +311,8 @@ def main():
                 confirm_db=not args.yes_db,
                 dry_run=args.dry_run,
                 overwrite_data=args.overwrite_data,
+                include_downloads_override=True if args.include_downloads else None,
+                skip_chroma_import=args.skip_chroma_import,
             )
         if not args.dry_run:
             print("✅ Import from staging complete.\n")
@@ -301,6 +351,8 @@ def main():
             confirm_db=not args.yes_db,
             dry_run=args.dry_run,
             overwrite_data=args.overwrite_data,
+            include_downloads_override=True if args.include_downloads else None,
+            skip_chroma_import=args.skip_chroma_import,
         )
 
     if not args.no_import and not args.dry_run:

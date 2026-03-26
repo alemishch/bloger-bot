@@ -3,7 +3,7 @@ import asyncio
 import structlog
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, CommandObject
 from aiogram.enums import ChatAction
 
 from bot.config import settings, load_blogger_config
@@ -251,7 +251,8 @@ async def cmd_help(message: Message):
         f"▪️ /profile — твои ответы из анкеты\n"
         f"▪️ /analyze — повторный анализ проблемных зон\n"
         f"▪️ /about — о боте\n"
-        f"▪️ /help — эта справка\n\n"
+        f"▪️ /help — эта справка\n"
+        f"▪️ /testrag — ответ как обычно + следующим сообщением фрагменты базы (оценка RAG)\n\n"
         f"⚠️ {cfg.get('legal_disclaimer', '')}",
         parse_mode="HTML",
     )
@@ -272,6 +273,113 @@ async def cmd_about(message: Message):
         f"Версия: 0.3.0",
         parse_mode="HTML",
     )
+
+
+def _testrag_sources_messages(sources: list, retrieval: dict | None = None) -> list[str]:
+    """Format RAG sources for follow-up Telegram messages (plain text, ≤4096 per part)."""
+    header = "📎 Источники RAG (testrag)\n\n"
+    if not sources:
+        lines = [
+            header
+            + "(контекст не подобран — в ответ не попали фрагменты из Chroma).\n\n"
+            + "Частая причина: в Postgres статус ready у контента, а векторы лежат в "
+            "отдельном томе Chroma. Если том пустой или другой машины — поиск ничего не находит, "
+            "модель отвечает только по стилю (tone of voice).\n\n"
+        ]
+        if retrieval:
+            lines.append(
+                f"Диагностика: коллекция «{retrieval.get('chroma_collection', '?')}», "
+                f"документов в Chroma: {retrieval.get('chroma_document_count', '?')}, "
+                f"чанков в контексте: {retrieval.get('chunks_in_context', '?')}.\n\n"
+            )
+        lines.append(
+            "Проверь: данные в Chroma (например tools/rag_eval или API Chroma), "
+            "перезапусти векторизацию для нужных item, либо восстанови том chroma_data вместе с БД."
+        )
+        return ["".join(lines)]
+
+    parts: list[str] = []
+    buf = header
+    for i, s in enumerate(sources, 1):
+        ref = s.get("ref") or "—"
+        cid = s.get("id") or "—"
+        sim = s.get("similarity")
+        preview = (s.get("text") or s.get("chunk") or "").strip()
+        block = f"{i}. {ref}\nid: {cid}\nsimilarity: {sim}\n{preview}\n\n"
+        if len(buf) + len(block) > 4096:
+            parts.append(buf.rstrip())
+            buf = block
+        else:
+            buf += block
+    parts.append(buf.rstrip())
+    return parts
+
+
+@router.message(Command("testrag"))
+async def cmd_testrag(message: Message, command: CommandObject):
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer("Использование: /testrag твой вопрос текстом")
+        return
+
+    user_state = await get_user_state(message.from_user.id)
+    if user_state and str(user_state.get("onboarding_status")) == "in_progress":
+        await message.answer(
+            "Сначала давай закончим знакомство! Нажми на одну из кнопок выше ☝️\n"
+            "Или /reset чтобы начать заново."
+        )
+        return
+
+    await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    thinking_msg = await message.answer("🔍 Изучаю вашу ситуацию…")
+
+    try:
+        session_id = await get_or_create_session(message.from_user.id, settings.BLOGGER_ID)
+        if session_id and user_state:
+            await save_chat_message(user_state["id"], session_id, "user", query)
+
+        chat_history = await get_session_history(message.from_user.id, max_messages=16)
+        user_profile = await get_long_term_profile(message.from_user.id)
+
+        await asyncio.sleep(0.3)
+        await thinking_msg.edit_text("📚 Подбираю релевантный опыт…")
+        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+        result = await ask_llm(
+            query=query,
+            blogger_id=settings.BLOGGER_ID,
+            chat_history=chat_history,
+            user_profile=user_profile,
+        )
+        answer = result.get("answer", "Не удалось получить ответ.")
+        if len(answer) > 4000:
+            answer = answer[:4000] + "…"
+        await thinking_msg.edit_text(answer)
+
+        if session_id and user_state:
+            token_count = result.get("usage", {}).get("completion_tokens")
+            await save_chat_message(user_state["id"], session_id, "assistant", answer, token_count)
+
+        for part in _testrag_sources_messages(
+            result.get("sources") or [],
+            retrieval=result.get("retrieval"),
+        ):
+            await message.answer(part)
+
+        asyncio.create_task(_try_update_profile(message.from_user.id))
+
+        logger.info(
+            "testrag_answered",
+            telegram_id=message.from_user.id,
+            query_len=len(query),
+            answer_len=len(answer),
+            sources=len(result.get("sources") or []),
+        )
+    except Exception as e:
+        logger.error("llm_error", error=str(e), telegram_id=message.from_user.id)
+        await thinking_msg.edit_text(
+            "😔 Произошла ошибка при обработке вопроса. Попробуй ещё раз через минуту."
+        )
 
 
 # ── Onboarding callbacks ────────────────────────────────────────────────────

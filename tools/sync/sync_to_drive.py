@@ -6,6 +6,8 @@ Usage (from repo root):
     python tools/sync/sync_to_drive.py
     python tools/sync/sync_to_drive.py --dry-run
     python tools/sync/sync_to_drive.py --skip-db
+    python tools/sync/sync_to_drive.py --include-downloads   # opt-in: sync data/downloads (large)
+    python tools/sync/sync_to_drive.py --skip-chroma         # opt-out: omit Chroma volume snapshot
 """
 import os
 import subprocess
@@ -68,7 +70,16 @@ def load_config(repo_root: Path) -> dict:
     return json.loads(config_path.read_text(encoding="utf-8"))
 
 
-def build_staging(repo_root: Path, staging: Path, config: dict, skip_db: bool, dry_run: bool, max_downloads_gb: float):
+def build_staging(
+    repo_root: Path,
+    staging: Path,
+    config: dict,
+    skip_db: bool,
+    dry_run: bool,
+    max_downloads_gb: float,
+    include_downloads: bool,
+    include_docker_chroma: bool,
+):
     """Build staging directory with all paths to sync (same layout as export_state + extra paths)."""
     staging.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -120,28 +131,33 @@ def build_staging(repo_root: Path, staging: Path, config: dict, skip_db: bool, d
                 shutil.rmtree(dst)
             if not dry_run:
                 shutil.copytree(src, dst)
-            count = len(list((dst if dst.exists() else src).rglob("*"))) if not dry_run else 0
             print(f"   ✅ {dst_name}\n")
         else:
             print(f"   ⏭️  No {src_name}\n")
 
-    # ── 5. Downloads (respect size limit) ──
+    # ── 5. Downloads (optional — large video/audio; default off, see drive_sync_config.json)
     print("5️⃣  Downloads...")
-    downloads_src = repo_root / "data" / "downloads"
-    if downloads_src.exists():
-        total_size = sum(f.stat().st_size for f in downloads_src.rglob("*") if f.is_file())
-        total_gb = total_size / (1024 ** 3)
-        if total_gb < max_downloads_gb:
-            downloads_dst = staging / "downloads"
-            if downloads_dst.exists() and not dry_run:
-                shutil.rmtree(downloads_dst)
-            if not dry_run:
-                shutil.copytree(downloads_src, downloads_dst)
-            print(f"   ✅ {total_gb:.2f} GB copied\n")
-        else:
-            print(f"   ⏭️  Skipped ({total_gb:.2f} GB > {max_downloads_gb} GB). Use --max-downloads-gb to change.\n")
+    if not include_downloads:
+        print("   ⏭️  Skipped (include_downloads=false). No video/media sync to cloud.\n")
     else:
-        print("   ⏭️  No data/downloads\n")
+        downloads_src = repo_root / "data" / "downloads"
+        if downloads_src.exists():
+            total_size = sum(f.stat().st_size for f in downloads_src.rglob("*") if f.is_file())
+            total_gb = total_size / (1024 ** 3)
+            if total_gb < max_downloads_gb:
+                downloads_dst = staging / "downloads"
+                if downloads_dst.exists() and not dry_run:
+                    shutil.rmtree(downloads_dst)
+                if not dry_run:
+                    shutil.copytree(downloads_src, downloads_dst)
+                print(f"   ✅ {total_gb:.2f} GB copied\n")
+            else:
+                print(
+                    f"   ⏭️  Skipped ({total_gb:.2f} GB > {max_downloads_gb} GB). "
+                    "Use --max-downloads-gb to change.\n"
+                )
+        else:
+            print("   ⏭️  No data/downloads\n")
 
     # ── 6. Extra paths from config (data/audio, data/exports, data/rag, chroma_db, etc.) ──
     handled = {"sessions", "data/transcriptions", "data/labeled", "data/downloads"}
@@ -158,7 +174,34 @@ def build_staging(repo_root: Path, staging: Path, config: dict, skip_db: bool, d
                 shutil.copytree(src, dst)
             print(f"   ✅ {rel}\n")
         else:
-            print(f"   ⏭️  Not present\n")
+            print("   ⏭️  Not present\n")
+
+    # ── Docker Chroma volume (named volume chroma_data → /chroma/chroma) ──
+    if include_docker_chroma:
+        import importlib.util
+
+        _cd_path = repo_root / "tools" / "sync" / "chroma_docker.py"
+        _spec = importlib.util.spec_from_file_location("_chroma_docker", _cd_path)
+        _chroma = importlib.util.module_from_spec(_spec)
+        assert _spec.loader
+        _spec.loader.exec_module(_chroma)
+
+        sub = config.get("staging_chroma_subdir", "chroma_docker_volume")
+        compose_file = config.get("docker_compose_file", "docker-compose.dev.yml")
+        chroma_dest = staging / sub
+        print(f"▶  Exporting Docker Chroma volume → {sub}/ ...")
+        ok = _chroma.export_chroma_volume(
+            repo_root,
+            compose_file,
+            chroma_dest,
+            dry_run=dry_run,
+        )
+        if ok or dry_run:
+            print("   ✅ Chroma snapshot ready for upload\n")
+        else:
+            print("   ⏭️  Chroma export skipped (start stack: docker compose up -d chromadb)\n")
+    else:
+        print("▶  ⏭️  Docker Chroma export disabled in config\n")
 
     # ── Manifest ──
     manifest = {
@@ -183,6 +226,16 @@ def main():
     parser.add_argument("--skip-db", action="store_true", help="Do not dump PostgreSQL.")
     parser.add_argument("--max-downloads-gb", type=float, default=10.0, help="Skip copying data/downloads if larger (default 10).")
     parser.add_argument("--keep-staging", action="store_true", help="Do not delete staging after sync.")
+    parser.add_argument(
+        "--include-downloads",
+        action="store_true",
+        help="Override config: copy data/downloads to Drive (large; may include video).",
+    )
+    parser.add_argument(
+        "--skip-chroma",
+        action="store_true",
+        help="Override config: do not export Docker Chroma volume into staging.",
+    )
     args = parser.parse_args()
 
     repo_root = find_repo_root()
@@ -196,7 +249,18 @@ def main():
     print(f"\n📤 Sync to Google Drive: {remote}:{folder}")
     print(f"   Repo root: {repo_root}\n")
 
-    build_staging(repo_root, staging, config, args.skip_db, args.dry_run, args.max_downloads_gb)
+    include_dl = bool(config.get("include_downloads", False)) or args.include_downloads
+    include_chroma = bool(config.get("include_docker_chroma", True)) and not args.skip_chroma
+    build_staging(
+        repo_root,
+        staging,
+        config,
+        args.skip_db,
+        args.dry_run,
+        args.max_downloads_gb,
+        include_downloads=include_dl,
+        include_docker_chroma=include_chroma,
+    )
 
     # rclone sync staging → remote:folder
     dest = f"{remote}:{folder}"

@@ -31,6 +31,7 @@ class AskResponse(BaseModel):
     answer: str
     sources: list[dict]
     usage: dict
+    retrieval: Optional[dict] = None
 
 
 @app.post("/api/v1/ask", response_model=AskResponse)
