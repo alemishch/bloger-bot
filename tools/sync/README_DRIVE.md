@@ -144,6 +144,27 @@ Configured in `tools/sync/drive_sync_config.json`:
 
 ---
 
+## Production server (CI/CD)
+
+CI/CD only **pulls images and restarts containers**; it does **not** copy Postgres or Chroma. Embeddings live in the Docker volume `chroma_data` on the VPS (same layout as dev: `chromadb:/chroma/chroma`).
+
+1. **SSH** to the server and `cd` to the deploy path (e.g. `/home/ubuntu/bloger-bot` from the workflow).
+2. **`git pull`** so you have the latest `tools/sync/` scripts.
+3. Edit **`tools/sync/drive_sync_config.json`** on that machine (or keep a server-only copy): set **`docker_compose_file`** to **`docker-compose.prod.yml`**. Optionally use a different **`remote_folder`** if prod should not share the same Drive folder as your laptop.
+4. **Install rclone** on the server once and `rclone config` (same remote name as in JSON, e.g. `gdrive`), or push from a laptop and only **pull** on the server with a read-only token if you prefer.
+5. **Push from prod (backup / publish server state):**  
+   `python tools/sync/sync_to_drive.py`  
+   Requires **Docker Compose with prod stack running** (`postgres`, `chromadb` up) so `pg_dump` and Chroma export work. This does **not** rebuild images; it only reads volumes and uploads to Drive.
+6. **Pull on prod (restore laptop state onto server):**  
+   `python tools/sync/sync_from_drive.py --yes-db` (or confirm DB prompt).  
+   Then restart services, e.g.:  
+   `COMPOSE_FILE=docker-compose.prod.yml docker compose restart chromadb llm-service telegram-bot-yuri ingestion-service ingestion-worker …`
+7. **Order of operations:** Restore **Postgres + Chroma from the same bundle** so `content_items` and vectors match. After a DB-only restore without Chroma, you would need **`queue-revectorize-ready`** again.
+
+**You do not need to “build” for sync:** sync uses the **repo’s Python scripts + rclone + `docker compose`**. Images still come from CI (`docker compose … pull`).
+
+---
+
 ## Cloud agent workflow
 
 1. **On your main machine:** run `python tools/sync/sync_to_drive.py` before starting work in the cloud.
