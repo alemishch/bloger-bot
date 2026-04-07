@@ -2,9 +2,12 @@ import os
 import yaml
 from pathlib import Path
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 
 
 class BotSettings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", extra="ignore")
+
     BLOGGER_ID: str = "yuri"
     CONFIG_DIR: str = "/app/config/bloggers"
     LLM_SERVICE_URL: str = "http://llm-service:8000"
@@ -13,9 +16,13 @@ class BotSettings(BaseSettings):
     POSTGRES_DB: str = ""
     POSTGRES_USER: str = ""
     POSTGRES_PASSWORD: str = ""
-
-    class Config:
-        env_file = ".env"
+    AMOCRM_ENABLED: bool = False
+    AMOCRM_DOMAIN: str = ""
+    AMOCRM_ACCESS_TOKEN: str = ""
+    AMOCRM_REFRESH_TOKEN: str = ""
+    AMOCRM_CLIENT_ID: str = ""
+    AMOCRM_CLIENT_SECRET: str = ""
+    AMOCRM_REDIRECT_URI: str = ""
 
     @property
     def database_url(self) -> str:

@@ -188,6 +188,9 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       BLOGGER_ID: ${BLOGGER_ID:-yuri}
+      CHAT_MODEL: ${CHAT_MODEL:-gpt-4o-mini}
+      OPENAI_STAGE_MODEL: ${OPENAI_STAGE_MODEL:-gpt-4o-mini}
+      LLM_DEBUG_STAGES: ${LLM_DEBUG_STAGES:-0}
     ports:
       - "${LLM_SERVICE_PORT:-8003}:8000"
     depends_on:

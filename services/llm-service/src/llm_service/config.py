@@ -1,20 +1,20 @@
 import os
 import yaml
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     OPENAI_API_KEY: str = ""
     CHROMA_HOST: str = "chromadb"
     CHROMA_PORT: int = 8000
     BLOGGER_ID: str = "yuri"
     CONFIG_DIR: str = "/app/config/bloggers"
     CHAT_MODEL: str = "gpt-4o-mini"
+    OPENAI_STAGE_MODEL: str = "gpt-4o-mini"
     EMBED_MODEL: str = "text-embedding-3-small"
-
-    class Config:
-        env_file = ".env"
 
 
 settings = LLMSettings()

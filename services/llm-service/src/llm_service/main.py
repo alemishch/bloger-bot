@@ -1,10 +1,10 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, ConfigDict
+from typing import Any, Optional
 import structlog
 
-from llm_service.config import settings
+from llm_service.config import load_blogger_config, settings
 from llm_service.rag import rag_answer
 
 logger = structlog.get_logger()
@@ -28,22 +28,49 @@ class AskRequest(BaseModel):
 
 
 class AskResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     answer: str
     sources: list[dict]
     usage: dict
     retrieval: Optional[dict] = None
+    quality_warning: bool = False
+    debug: Optional[dict[str, Any]] = None
 
 
 @app.post("/api/v1/ask", response_model=AskResponse)
 async def ask(req: AskRequest):
     blogger = req.blogger_id or settings.BLOGGER_ID
+    try:
+        cfg = load_blogger_config(blogger)
+    except FileNotFoundError:
+        cfg = {}
+
+    if cfg.get("conversation_pipeline_v2"):
+        from llm_service.pipeline import conversation_pipeline_answer
+
+        result = await conversation_pipeline_answer(
+            query=req.query,
+            blogger_id=blogger,
+            chat_history=req.chat_history,
+            user_profile=req.user_profile,
+        )
+        return AskResponse(**result)
+
     result = await rag_answer(
         query=req.query,
         blogger_id=blogger,
         chat_history=req.chat_history,
         user_profile=req.user_profile,
     )
-    return result
+    return AskResponse(
+        answer=result["answer"],
+        sources=result["sources"],
+        usage=result["usage"],
+        retrieval=result.get("retrieval"),
+        quality_warning=result.get("quality_warning", False),
+        debug=result.get("debug"),
+    )
 
 
 class AnalyzeRequest(BaseModel):
