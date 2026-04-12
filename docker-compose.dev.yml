@@ -210,6 +210,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      OUTBOUND_PROXY_URL: ${OUTBOUND_PROXY_URL:-}
+      HTTP_PROXY: ${OUTBOUND_PROXY_URL:-}
+      HTTPS_PROXY: ${OUTBOUND_PROXY_URL:-}
+      NO_PROXY: localhost,127.0.0.1,postgres,redis,chromadb,llm-service,ingestion-service,user-service,admin-service
     volumes:
       - ./services/telegram-bot/src:/app/src
       - ./config:/app/config

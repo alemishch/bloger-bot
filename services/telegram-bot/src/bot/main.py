@@ -2,6 +2,7 @@
 import asyncio
 import structlog
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from bot.config import settings, load_blogger_config
 from bot.handlers import router
@@ -18,14 +19,20 @@ async def main():
             f"Set TELEGRAM_BOT_TOKEN_{settings.BLOGGER_ID.upper()} env var."
         )
 
-    bot = Bot(token=token)
-    dp = Dispatcher()
-    dp.include_router(router)
+    proxy_url = settings.telegram_proxy_url
+    bot_kwargs: dict = {"token": token}
+    if proxy_url:
+        bot_kwargs["session"] = AiohttpSession(proxy=proxy_url)
+        logger.info("telegram_proxy_enabled")
 
-    me = await bot.get_me()
-    logger.info("bot_started", username=me.username, blogger=settings.BLOGGER_ID)
+    async with Bot(**bot_kwargs) as bot:
+        dp = Dispatcher()
+        dp.include_router(router)
 
-    await dp.start_polling(bot)
+        me = await bot.get_me()
+        logger.info("bot_started", username=me.username, blogger=settings.BLOGGER_ID)
+
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
