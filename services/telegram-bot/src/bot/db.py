@@ -2,7 +2,9 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy import text
 from bot.config import settings
+from bot.profile_budget import fit_profile_to_budget
 import uuid
+import json as _json
 
 _engine = None
 _session_factory = None
@@ -276,17 +278,14 @@ async def get_long_term_profile(telegram_id: int) -> dict | None:
 
 
 async def update_long_term_profile(telegram_id: int, profile: dict):
-    """Update user's cold profile JSON."""
-    import json as _json
-    profile_str = _json.dumps(profile, ensure_ascii=False)
-    if len(profile_str) > 4000:
-        profile_str = profile_str[:4000]
-        profile = _json.loads(profile_str[:profile_str.rfind('"')] + '"}')
+    """Update user's cold profile JSON (TASK.md §14.4 — budgeted to ≤4000 chars, valid JSON)."""
+    safe = fit_profile_to_budget(profile, max_chars=4000)
+    payload = _json.dumps(safe, ensure_ascii=False)
     factory = get_session_factory()
     async with factory() as session:
         await session.execute(
             text("UPDATE users SET long_term_profile = CAST(:p AS json), updated_at = NOW() WHERE telegram_id = :tid"),
-            {"p": _json.dumps(profile, ensure_ascii=False), "tid": telegram_id},
+            {"p": payload, "tid": telegram_id},
         )
         await session.commit()
 

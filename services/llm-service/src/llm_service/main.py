@@ -36,6 +36,7 @@ class AskResponse(BaseModel):
     retrieval: Optional[dict] = None
     quality_warning: bool = False
     debug: Optional[dict[str, Any]] = None
+    profile_delta: Optional[dict[str, Any]] = None
 
 
 @app.post("/api/v1/ask", response_model=AskResponse)
@@ -70,6 +71,7 @@ async def ask(req: AskRequest):
         retrieval=result.get("retrieval"),
         quality_warning=result.get("quality_warning", False),
         debug=result.get("debug"),
+        profile_delta=result.get("profile_delta"),
     )
 
 

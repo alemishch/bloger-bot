@@ -1,9 +1,9 @@
 """RAG engine: embed query → search ChromaDB → build context → call LLM."""
 import structlog
 import chromadb
-from openai import AsyncOpenAI
 
 from llm_service.config import settings, load_blogger_config
+from llm_service.openai_http import async_openai_client
 
 logger = structlog.get_logger()
 
@@ -31,7 +31,7 @@ async def rag_answer(
     system_prompt = cfg.get("tone_of_voice_prompt", "")
     disclaimer = cfg.get("legal_disclaimer", "")
 
-    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    openai_client = async_openai_client()
 
     emb_resp = await openai_client.embeddings.create(
         model=settings.EMBED_MODEL, input=query,
@@ -193,7 +193,7 @@ async def analyze_onboarding(
 
     name = user_name or "пользователь"
 
-    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    openai_client = async_openai_client()
 
     collection = get_chroma_collection(blogger_id)
     # Retrieval по всему профилю анкеты — чтобы гипотезы не были “только про симптомы”.
@@ -328,7 +328,7 @@ async def update_user_profile(
     """Session-updater agent (per §14.3): analyze dialogue → update profile fields."""
     import json as _json
 
-    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    openai_client = async_openai_client()
 
     current = _json.dumps(current_profile or {}, ensure_ascii=False, indent=2)
     dialogue = "\n".join(f"[{m['role']}]: {m['content'][:500]}" for m in messages[-20:])
@@ -346,7 +346,12 @@ async def update_user_profile(
 - previous_session_summary: перенеси сюда старый last_session_summary
 - pattern_summary: 2-4 предложения: повторяющиеся темы, автоматизмы, устойчивые реакции (только если проявились в диалоге; иначе оставь как в текущем профиле или пусто)
 - previous_hypotheses: массив из 0-3 объектов {{"id": "H1", "zone": "...", "hypothesis": "кратко"}} — последние значимые гипотезы бота/пользователя в сессии; пустой массив если нечего фиксировать
-- dialogue_phase: одно из: free_chat, exploration, deepening — только если по диалогу однозначно; иначе не меняй существующее значение
+- covered_keywords: массив до 20 коротких строк — темы/слова, которые уже неоднократно поднимались (обновляй: добавь новое из сессии, убери дубли, сжимай старое)
+- covered_hypotheses: массив до 4 коротких строк — формулировки гипотез, которые уже озвучивал бот в этой и прошлых сессиях (не дублируй дословно старое — объединяй)
+- assistant_lexical_used: массив до 15 коротких строк — устойчивые штампы/зачины из ответов ассистента в диалоге (например «скажем так», «давайте посмотрим»), чтобы следующие ответы меняли форму
+
+НЕ ВКЛЮЧАЙ в JSON и НЕ МЕНЯЙ через этот агент (ими управляет чат-пайплайн, сохрани из текущего профиля как есть): dialogue_phase, phase_started_at, phase_log.
+Если эти ключи есть в текущем профиле — скопируй их в ответ без изменений.
 
 ПРАВИЛА:
 - Не домысливай возраст, профессию, эмоциональное состояние
@@ -372,7 +377,12 @@ async def update_user_profile(
     try:
         updated = _json.loads(resp.choices[0].message.content)
     except _json.JSONDecodeError:
-        updated = current_profile or {}
+        updated = dict(current_profile or {})
+
+    base = dict(current_profile or {})
+    for key in ("dialogue_phase", "phase_started_at", "phase_log"):
+        if key in base:
+            updated[key] = base[key]
 
     summary = updated.get("last_session_summary", "")
 

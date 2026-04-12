@@ -14,7 +14,12 @@ class LLMSettings(BaseSettings):
     CONFIG_DIR: str = "/app/config/bloggers"
     CHAT_MODEL: str = "gpt-4o-mini"
     OPENAI_STAGE_MODEL: str = "gpt-4o-mini"
+    # If set, used for analysis / hypothesis / rerank / judge instead of OPENAI_STAGE_MODEL (reasoning-capable models).
+    OPENAI_REASONING_MODEL: str = ""
     EMBED_MODEL: str = "text-embedding-3-small"
+    # httpx timeouts for all OpenAI API calls (embeddings often hit this first)
+    OPENAI_HTTP_TIMEOUT: float = 300.0
+    OPENAI_HTTP_CONNECT_TIMEOUT: float = 60.0
 
 
 settings = LLMSettings()

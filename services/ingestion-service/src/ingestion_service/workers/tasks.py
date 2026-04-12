@@ -6,10 +6,19 @@ import subprocess
 import structlog
 from typing import Optional
 
+import httpx
+
 from ingestion_service.workers.celery_app import celery_app
 from ingestion_service.config import settings
 
 logger = structlog.get_logger()
+
+
+def _openai_http_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        settings.OPENAI_HTTP_TIMEOUT,
+        connect=settings.OPENAI_HTTP_CONNECT_TIMEOUT,
+    )
 
 WHISPER_MAX_BYTES = 24 * 1024 * 1024  # 24 MB
 
@@ -561,7 +570,7 @@ async def _transcribe_with_groq(chunks: list[str], api_key: str) -> list[str]:
 
 async def _transcribe_with_openai(chunks: list[str], api_key: str) -> list[str]:
     from openai import AsyncOpenAI
-    async with AsyncOpenAI(api_key=api_key) as client:
+    async with AsyncOpenAI(api_key=api_key, timeout=_openai_http_timeout()) as client:
         parts = []
         for i, chunk_path in enumerate(chunks):
             logger.info("transcribing_chunk_openai", chunk=i + 1, total=len(chunks))
@@ -618,7 +627,10 @@ def label_item(self, content_item_id: str):
 Только валидный JSON на русском языке."""
 
                 import openai
-                async with openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) as client:
+                async with openai.AsyncOpenAI(
+                    api_key=settings.OPENAI_API_KEY,
+                    timeout=_openai_http_timeout(),
+                ) as client:
                     response = await client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[{"role": "user", "content": prompt}],
@@ -700,7 +712,10 @@ def vectorize_item(self, content_item_id: str):
                 # Embed in batches of 50 — avoids token limit errors on large transcripts
                 EMBED_BATCH = 50
                 all_embeddings = []
-                async with AsyncOpenAI(api_key=settings.OPENAI_API_KEY) as openai_client:
+                async with AsyncOpenAI(
+                    api_key=settings.OPENAI_API_KEY,
+                    timeout=_openai_http_timeout(),
+                ) as openai_client:
                     for batch_start in range(0, len(chunks), EMBED_BATCH):
                         batch = chunks[batch_start:batch_start + EMBED_BATCH]
                         resp = await openai_client.embeddings.create(

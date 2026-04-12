@@ -11,6 +11,9 @@ class BotSettings(BaseSettings):
     BLOGGER_ID: str = "yuri"
     CONFIG_DIR: str = "/app/config/bloggers"
     LLM_SERVICE_URL: str = "http://llm-service:8000"
+    # httpx timeouts for HTTP calls to llm-service (not direct OpenAI)
+    LLM_HTTP_TIMEOUT: float = 360.0
+    LLM_HTTP_CONNECT_TIMEOUT: float = 60.0
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = ""
