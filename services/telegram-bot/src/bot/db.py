@@ -94,7 +94,8 @@ async def get_user_state(telegram_id: int) -> dict | None:
     factory = get_session_factory()
     async with factory() as session:
         row = (await session.execute(
-            text("""SELECT id, onboarding_status::text, onboarding_step, profile_data
+            text("""SELECT id, onboarding_status::text, onboarding_step, profile_data,
+                           phone, email, first_name, last_name, amocrm_contact_id
                     FROM users WHERE telegram_id = :tid"""),
             {"tid": telegram_id},
         )).mappings().first()
@@ -105,7 +106,24 @@ async def get_user_state(telegram_id: int) -> dict | None:
             "onboarding_status": str(row["onboarding_status"]),
             "onboarding_step": row["onboarding_step"],
             "profile_data": row["profile_data"],
+            "phone": row["phone"],
+            "email": row["email"],
+            "first_name": row["first_name"],
+            "last_name": row["last_name"],
+            "amocrm_contact_id": row["amocrm_contact_id"],
         }
+
+
+async def set_amocrm_contact_id(telegram_id: int, contact_id: str):
+    factory = get_session_factory()
+    async with factory() as session:
+        await session.execute(
+            text("""UPDATE users
+                    SET amocrm_contact_id = :cid, updated_at = NOW()
+                    WHERE telegram_id = :tid"""),
+            {"cid": contact_id, "tid": telegram_id},
+        )
+        await session.commit()
 
 
 async def save_onboarding_response(

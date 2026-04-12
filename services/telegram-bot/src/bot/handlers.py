@@ -13,9 +13,10 @@ from bot.db import (
     get_user_state, get_or_create_session, save_chat_message,
     get_onboarding_responses, clear_onboarding_responses,
     get_session_history, get_long_term_profile,
-    update_long_term_profile, get_closed_session_for_update,
+    update_long_term_profile, get_closed_session_for_update, set_amocrm_contact_id,
     mark_session_summarized,
 )
+from bot.amocrm import AmoCRMClient
 from bot.onboarding import (
     get_step, get_first_step_id,
     build_step_message, get_lead_magnet_text,
@@ -25,6 +26,44 @@ logger = structlog.get_logger()
 router = Router()
 
 _multi_select: dict[int, dict[str, list[str]]] = {}
+_amocrm_client = AmoCRMClient()
+
+
+async def _sync_user_to_amocrm(telegram_id: int):
+    """Best-effort sync: does not block onboarding on errors."""
+    try:
+        if not _amocrm_client.enabled:
+            return
+        state = await get_user_state(telegram_id)
+        if not state:
+            return
+        phone = state.get("phone")
+        if not phone:
+            return
+        first_name = state.get("first_name") or ""
+        last_name = state.get("last_name") or ""
+        name = (f"{first_name} {last_name}").strip() or None
+        existing_contact_id = state.get("amocrm_contact_id")
+        if existing_contact_id:
+            updated = await _amocrm_client.update_contact(
+                contact_id=existing_contact_id,
+                name=name,
+                phone=phone,
+                email=state.get("email"),
+            )
+            if updated:
+                logger.info("amocrm_contact_updated", telegram_id=telegram_id, contact_id=existing_contact_id)
+            return
+        result = await _amocrm_client.find_or_create_contact(
+            name=name,
+            phone=phone,
+            email=state.get("email"),
+        )
+        if result:
+            await set_amocrm_contact_id(telegram_id, result.contact_id)
+            logger.info("amocrm_contact_synced", telegram_id=telegram_id, contact_id=result.contact_id, created=result.created)
+    except Exception as e:
+        logger.warning("amocrm_sync_failed", telegram_id=telegram_id, error=str(e))
 
 
 async def _try_update_profile(telegram_id: int):
@@ -165,6 +204,7 @@ async def cmd_start(message: Message):
 
     if user_info["is_new"] or status == "not_started":
         logger.info("onboarding_start", telegram_id=message.from_user.id)
+        await _sync_user_to_amocrm(message.from_user.id)
         first_step = get_first_step_id()
         await update_onboarding_state(message.from_user.id, "in_progress", first_step)
         await _send_step(message, first_step, name)

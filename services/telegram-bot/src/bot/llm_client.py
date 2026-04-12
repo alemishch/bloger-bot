@@ -5,7 +5,7 @@ from bot.config import settings
 
 logger = structlog.get_logger()
 
-_timeout = httpx.Timeout(30.0, connect=5.0)
+_timeout = httpx.Timeout(150.0, connect=5.0)
 _long_timeout = httpx.Timeout(60.0, connect=5.0)
 
 
