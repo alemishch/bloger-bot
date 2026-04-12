@@ -5,8 +5,8 @@ from bot.config import settings
 
 logger = structlog.get_logger()
 
-_timeout = httpx.Timeout(150.0, connect=5.0)
-_long_timeout = httpx.Timeout(60.0, connect=5.0)
+_timeout = httpx.Timeout(settings.LLM_HTTP_TIMEOUT, connect=settings.LLM_HTTP_CONNECT_TIMEOUT)
+_long_timeout = httpx.Timeout(settings.LLM_HTTP_TIMEOUT, connect=settings.LLM_HTTP_CONNECT_TIMEOUT)
 
 
 async def ask_llm(

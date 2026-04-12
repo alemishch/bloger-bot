@@ -85,11 +85,41 @@ def build_anti_repetition_block(
     return "\n".join(lines)
 
 
+def build_long_memory_block(profile: dict) -> str:
+    """Structured cold-memory hints to avoid repeating themes and lexical tics across sessions."""
+    lines: list[str] = []
+    ck = profile.get("covered_keywords")
+    if isinstance(ck, list) and ck:
+        lines.append("Ключевые слова/темы уже неоднократно звучали: " + ", ".join(str(x) for x in ck[:20]))
+    elif isinstance(ck, str) and ck.strip():
+        lines.append(f"Ключевые слова/темы: {ck.strip()[:800]}")
+
+    ch = profile.get("covered_hypotheses")
+    if isinstance(ch, list) and ch:
+        lines.append("Уже озвученные гипотезы (не повторять тем же языком):")
+        for item in ch[:6]:
+            if isinstance(item, str):
+                lines.append(f"- {item[:400]}")
+            elif isinstance(item, dict):
+                lines.append(f"- {str(item.get('hypothesis') or item)[:400]}")
+    elif isinstance(ch, str) and ch.strip():
+        lines.append(f"Гипотезы ранее: {ch.strip()[:800]}")
+
+    al = profile.get("assistant_lexical_used")
+    if isinstance(al, list) and al:
+        lines.append("Штампы/приёмы ассистента уже использовались: " + "; ".join(str(x) for x in al[:15]))
+    elif isinstance(al, str) and al.strip():
+        lines.append(f"Штампы ассистента: {al.strip()[:600]}")
+
+    return "\n".join(lines) if lines else ""
+
+
 def pack_context(
     chat_history: list[dict] | None,
     user_profile: dict | None,
     dialogue_phase: str = "free_chat",
     working_turns: int = 6,
+    dialogue_phase_override: str | None = None,
 ) -> dict[str, Any]:
     """
     Build a memory brief: working memory (recent turns) + profile slices for agents.
@@ -97,10 +127,10 @@ def pack_context(
     Optional profile keys (filled by update_user_profile over time):
     - pattern_summary: str — recurring themes / automatisms
     - previous_hypotheses: list[dict] | str — last turn hypotheses for continuity
-    - dialogue_phase can also live in profile and override the argument if present.
+    - dialogue_phase: used unless dialogue_phase_override is set (pipeline uses override for YAML ids).
     """
     profile = user_profile if isinstance(user_profile, dict) else {}
-    phase = profile.get("dialogue_phase") or dialogue_phase
+    phase = dialogue_phase_override if dialogue_phase_override else (profile.get("dialogue_phase") or dialogue_phase)
 
     recent = _last_n_messages(chat_history, working_turns)
     lines: list[str] = []
@@ -137,10 +167,12 @@ def pack_context(
             profile_bits.append(f"previous_hypotheses: {str(prev_hyp)[:1500]}")
 
     profile_block = "\n".join(profile_bits) if profile_bits else "(профиль пуст или минимален)"
+    long_memory_text = build_long_memory_block(profile)
 
     return {
         "dialogue_phase": phase,
         "working_memory_text": working_block,
         "profile_text": profile_block,
+        "long_memory_text": long_memory_text,
         "raw_profile": profile,
     }

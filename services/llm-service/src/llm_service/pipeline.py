@@ -6,7 +6,6 @@ import os
 from typing import Any
 
 import structlog
-from openai import AsyncOpenAI
 
 from llm_service.agents import (
     build_content_package,
@@ -22,6 +21,23 @@ from llm_service.context_pack import (
     build_anti_repetition_block,
     count_user_turns,
     pack_context,
+)
+from llm_service.openai_compat import pipeline_stage_model
+from llm_service.openai_http import async_openai_client
+from llm_service.phase_gate import (
+    days_since_phase_start,
+    rejection_hint_for_hypothesis,
+    resolve_phase_transition,
+    utc_today,
+)
+from llm_service.phases import (
+    append_phase_log,
+    build_phase_context_block,
+    default_phase_id,
+    get_phase_by_id,
+    load_phase_config,
+    next_phase_id,
+    phase_catalog_for_prompt,
 )
 from llm_service.retrieval import multi_query_retrieve
 
@@ -44,7 +60,7 @@ async def conversation_pipeline_answer(
     rag_cfg = cfg.get("rag", {})
     retrieve_n = min(int(rag_cfg.get("pipeline_retrieve_n", 14)), 30)
 
-    stage_model = os.getenv("OPENAI_STAGE_MODEL", settings.OPENAI_STAGE_MODEL)
+    stage_model = pipeline_stage_model()
     chat_model = settings.CHAT_MODEL
 
     methodology = (cfg.get("methodology_framework") or "").strip()
@@ -60,11 +76,44 @@ async def conversation_pipeline_answer(
     tone = cfg.get("tone_of_voice_prompt", "")
     disclaimer = cfg.get("legal_disclaimer", "")
 
+    phases, ordered_ids = load_phase_config(blogger_id)
+    profile: dict[str, Any] = user_profile if isinstance(user_profile, dict) else {}
+
+    raw_phase = (profile.get("dialogue_phase") or "").strip()
+    phase_before = raw_phase if raw_phase in ordered_ids else default_phase_id(ordered_ids)
+
+    active_before = get_phase_by_id(phases, phase_before)
+    if not active_before and phases:
+        active_before = phases[0]
+        phase_before = active_before.id
+
+    dsp = days_since_phase_start(profile.get("phase_started_at"))
+    days_in_phase = dsp if dsp is not None else 0
+
+    next_title: str | None = None
+    nxt_id = next_phase_id(ordered_ids, phase_before)
+    if nxt_id:
+        np = get_phase_by_id(phases, nxt_id)
+        next_title = (np.title if np else None) or nxt_id
+
+    pcb = ""
+    if active_before:
+        pcb = build_phase_context_block(
+            phases=phases,
+            ordered_ids=ordered_ids,
+            active=active_before,
+            days_in_phase=days_in_phase,
+            next_title=next_title,
+        )
+
+    phase_catalog = phase_catalog_for_prompt(phases)
+
     packed = pack_context(
         chat_history,
         user_profile,
-        dialogue_phase=dialogue_phase or "free_chat",
+        dialogue_phase=dialogue_phase or phase_before,
         working_turns=int(cfg.get("pipeline_working_turns", 6)),
+        dialogue_phase_override=phase_before,
     )
 
     user_turn = count_user_turns(chat_history)
@@ -73,9 +122,17 @@ async def conversation_pipeline_answer(
         max_assistant_messages=int(cfg.get("pipeline_anti_repeat_assistants", 4)),
     )
 
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = async_openai_client()
     usage_acc: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
     timings: dict[str, float] = {}
+
+    first_phase_analysis_hint = ""
+    if ordered_ids and phase_before == ordered_ids[0]:
+        first_phase_analysis_hint = (
+            "Сейчас ПЕРВАЯ фаза (сбор как ~3 визита психолога): phase_readiness.enough_for_hypothesis держи false, "
+            "пока нет богатой картины (история, контекст, что пробовали, повторы во времени). "
+            "phase_transition.sufficient_understanding=true только если по объёму данных это правда сопоставимо с тремя полноценными сессиями; иначе false и не запрашивай переход вперёд."
+        )
 
     analysis = await run_analysis_agent(
         client,
@@ -83,10 +140,53 @@ async def conversation_pipeline_answer(
         packed_working_memory=packed["working_memory_text"],
         packed_profile=packed["profile_text"],
         dialogue_phase=packed["dialogue_phase"],
+        phase_catalog=phase_catalog,
+        phase_context_block=pcb,
         model=stage_model,
         usage_acc=usage_acc,
         stage_timings_ms=timings,
+        first_phase_analysis_hint=first_phase_analysis_hint,
     )
+
+    transition = analysis.get("phase_transition")
+    if not isinstance(transition, dict):
+        transition = {}
+
+    _eff_id, _eff_started, gate_delta, gdebug = resolve_phase_transition(
+        phases=phases,
+        ordered_ids=ordered_ids,
+        profile_phase_id=profile.get("dialogue_phase"),
+        profile_phase_started_at=profile.get("phase_started_at"),
+        transition=transition,
+        ensure_start_date=utc_today().isoformat(),
+    )
+
+    notes = gdebug.get("gate_notes") or []
+    gate_hint = rejection_hint_for_hypothesis([str(x) for x in notes])
+
+    active_eff = get_phase_by_id(phases, _eff_id) or active_before
+    phase_focus_block = ""
+    if active_eff:
+        phase_focus_block = f"Фаза: {active_eff.id} — {active_eff.title}\n{active_eff.prompt_injection.strip()}"
+
+    in_first_phase = bool(ordered_ids and _eff_id == ordered_ids[0])
+    if in_first_phase:
+        phase_focus_block = (
+            "РЕЖИМ: первая фаза — как ~3 визита психолога только на сбор картины, без «терапии».\n"
+            "response_plan: strategy и next_action — уточняющие вопросы и прояснение; key_insight — короткое отражение, не вердикт. "
+            "hypotheses: 0–1 очень мягкая наводка или пусто; не строй развёрнутую клинику в JSON. "
+            "DO_NOT должен явно запрещать планы лечения, назначения, длинные выводы «вам нужно…», списки техник.\n\n"
+            + phase_focus_block
+        )
+
+    profile_delta: dict[str, Any] = {k: v for k, v in gate_delta.items() if v is not None}
+    if profile_delta.get("dialogue_phase") and profile_delta["dialogue_phase"] != phase_before:
+        profile_delta["phase_log"] = append_phase_log(
+            profile.get("phase_log"),
+            from_phase=phase_before,
+            to_phase=profile_delta["dialogue_phase"],
+            reason=str(transition.get("reason") or "")[:500],
+        )
 
     hypothesis = await run_hypothesis_agent(
         client,
@@ -98,6 +198,9 @@ async def conversation_pipeline_answer(
         stage_timings_ms=timings,
         user_turn_index=user_turn,
         anti_repeat_block=anti_repeat,
+        phase_gate_hint=gate_hint,
+        phase_focus_block=phase_focus_block,
+        long_memory_block=packed.get("long_memory_text") or "",
     )
 
     response_plan = hypothesis.get("response_plan") or {}
@@ -153,6 +256,13 @@ async def conversation_pipeline_answer(
     content_block, sources = build_content_package(ranked, blogger_id)
     had_content = bool(ranked)
 
+    exploration_note = ""
+    if in_first_phase:
+        exploration_note = (
+            "Сейчас первая фаза (сбор как у психолога): ответ в основном из вопросов и 1–2 предложений отражения. "
+            "Не разворачивай «лечение», программы изменений и длинные рекомендации — даже если план тянет в эту сторону, смягчи к уточнению."
+        )
+
     draft = await run_generation_agent(
         client,
         tone_of_voice=tone,
@@ -168,6 +278,7 @@ async def conversation_pipeline_answer(
         stage_timings_ms=timings,
         user_turn_index=user_turn,
         anti_repeat_block=anti_repeat,
+        exploration_mode_note=exploration_note,
     )
 
     quality_warning = False
@@ -236,6 +347,9 @@ async def conversation_pipeline_answer(
         "quality_warning": quality_warning,
     }
 
+    if profile_delta:
+        result["profile_delta"] = profile_delta
+
     if _llm_debug_stages():
         result["debug"] = {
             "analysis": analysis,
@@ -243,6 +357,7 @@ async def conversation_pipeline_answer(
             "judge": judge,
             "timings_ms": timings,
             "queries": unique_queries,
+            "phase_gate": gdebug,
         }
 
     return result

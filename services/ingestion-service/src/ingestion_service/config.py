@@ -19,6 +19,8 @@ class IngestionSettings(BaseAppSettings):
     MAX_RETRIES: int = 3
 
     OPENAI_API_KEY: str = ""
+    OPENAI_HTTP_TIMEOUT: float = 300.0
+    OPENAI_HTTP_CONNECT_TIMEOUT: float = 60.0
 
     CHROMA_HOST: str = "chromadb"
     CHROMA_PORT: int = 8000

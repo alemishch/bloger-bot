@@ -16,6 +16,7 @@ from bot.db import (
     update_long_term_profile, get_closed_session_for_update, set_amocrm_contact_id,
     mark_session_summarized,
 )
+from bot.profile_budget import merge_profile_delta
 from bot.amocrm import AmoCRMClient
 from bot.onboarding import (
     get_step, get_first_step_id,
@@ -400,6 +401,11 @@ async def cmd_testrag(message: Message, command: CommandObject):
             token_count = result.get("usage", {}).get("completion_tokens")
             await save_chat_message(user_state["id"], session_id, "assistant", answer, token_count)
 
+        pd = result.get("profile_delta")
+        if pd and user_state:
+            cur = await get_long_term_profile(message.from_user.id) or {}
+            await update_long_term_profile(message.from_user.id, merge_profile_delta(cur, pd))
+
         for part in _testrag_sources_messages(
             result.get("sources") or [],
             retrieval=result.get("retrieval"),
@@ -550,6 +556,11 @@ async def handle_text(message: Message):
         if session_id and user_state:
             token_count = result.get("usage", {}).get("completion_tokens")
             await save_chat_message(user_state["id"], session_id, "assistant", answer, token_count)
+
+        pd = result.get("profile_delta")
+        if pd and user_state:
+            cur = await get_long_term_profile(message.from_user.id) or {}
+            await update_long_term_profile(message.from_user.id, merge_profile_delta(cur, pd))
 
         asyncio.create_task(_try_update_profile(message.from_user.id))
 

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import structlog
-from openai import APIStatusError, AsyncOpenAI
-from openai.types.chat import ChatCompletion
+from openai import AsyncOpenAI
 
+from llm_service.openai_compat import chat_completion_json, chat_completion_text
 from llm_service.retrieval import format_ref
 
 logger = structlog.get_logger()
@@ -38,13 +37,6 @@ def _safe_json_for_prompt(obj: Any, max_chars: int) -> str:
     return s
 
 
-def _add_usage(acc: dict[str, int], resp: ChatCompletion | None) -> None:
-    if not resp or not resp.usage:
-        return
-    acc["prompt_tokens"] = acc.get("prompt_tokens", 0) + (resp.usage.prompt_tokens or 0)
-    acc["completion_tokens"] = acc.get("completion_tokens", 0) + (resp.usage.completion_tokens or 0)
-
-
 ANALYSIS_SCHEMA_HINT = """
 Верни ТОЛЬКО JSON со ключами:
 - intent: string (один из: запрос_причины, жалоба, уточнение, сопротивление, готовность_к_действию, small_talk, другое)
@@ -54,6 +46,11 @@ ANALYSIS_SCHEMA_HINT = """
 - what_user_resists: array of strings (сопротивления, защита позиции)
 - information_gaps: array of strings (чего не хватает для качественной гипотезы)
 - phase_readiness: object с полями enough_for_analysis: bool, enough_for_hypothesis: bool, missing_slots: array of strings
+- phase_transition: object с полями requested: bool, to_phase_id: string или null (id из каталога фаз), reason: string,
+  user_signals: array of strings (коротко, почему пора менять фазу или остаться),
+  sufficient_understanding: bool — ОБЯЗАТЕЛЬНО. Если текущая фаза ПЕРВАЯ в каталоге: true только когда накоплено столько контекста,
+  что по объёму сопоставимо с тремя полноценными визитами к психологу (история, контекст жизни, что пробовали, временная линия, острые точки);
+  до этого всегда false. Во всех остальных фазах при запросе перехода вперёд можно ставить true если основания есть, иначе false.
 """
 
 
@@ -64,38 +61,64 @@ async def run_analysis_agent(
     packed_working_memory: str,
     packed_profile: str,
     dialogue_phase: str,
+    phase_catalog: str,
+    phase_context_block: str,
     model: str,
     usage_acc: dict[str, int],
     stage_timings_ms: dict[str, float],
+    first_phase_analysis_hint: str = "",
 ) -> dict[str, Any]:
-    t0 = time.perf_counter()
     system = (
         "Ты — аналитический модуль системы. Извлеки структурированную информацию из сообщения пользователя. "
         "Ты НЕ генерируешь ответ пользователю.\n\n" + ANALYSIS_SCHEMA_HINT
     )
     um = _sanitize_api_text(user_message, 6000)
+    cat = _sanitize_api_text(phase_catalog, 4000)
+    pcb = _sanitize_api_text(phase_context_block, 6000)
+    fph = _sanitize_api_text(first_phase_analysis_hint, 1200)
+    fph_block = f"{fph}\n\n" if fph else ""
     user = (
-        f"Текущая фаза диалога: {dialogue_phase}\n\n"
+        f"{pcb}\n\n"
+        f"{fph_block}"
+        f"КАТАЛОГ ФАЗ (to_phase_id только из этих id):\n{cat}\n\n"
+        f"Текущая фаза диалога (id): {dialogue_phase}\n\n"
         f"Профиль и память (кратко):\n{packed_profile}\n\n"
         f"Недавний диалог:\n{packed_working_memory}\n\n"
         f"Новое сообщение пользователя:\n{um}\n\n"
-        "Ответь строго JSON."
+        "Ответь строго JSON. phase_transition.requested=true только если есть основания сменить фазу; "
+        "to_phase_id — следующая фаза по списку, предыдущая (откат) или та же; не выдумывай id. "
+        "Если сейчас первая фаза в каталоге: не запрашивай переход вперёд без sufficient_understanding=true "
+        "(накоплено по сути как за ~3 визита; иначе оставайся в первой фазе и продолжай исследование)."
     )
-    resp = await client.chat.completions.create(
+    resp = await chat_completion_json(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.2,
         max_tokens=1200,
-        response_format={"type": "json_object"},
+        temperature=0.2,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key="analysis",
     )
-    _add_usage(usage_acc, resp)
-    stage_timings_ms["analysis"] = (time.perf_counter() - t0) * 1000
     raw = resp.choices[0].message.content or "{}"
     try:
-        return json.loads(raw)
+        data = json.loads(raw)
+        pt = data.get("phase_transition")
+        if not isinstance(pt, dict):
+            data["phase_transition"] = {
+                "requested": False,
+                "to_phase_id": None,
+                "reason": "",
+                "user_signals": [],
+                "sufficient_understanding": False,
+            }
+        else:
+            if "sufficient_understanding" not in pt:
+                pt["sufficient_understanding"] = False
+        return data
     except json.JSONDecodeError:
         logger.warning("analysis_json_fallback")
         return {
@@ -106,6 +129,13 @@ async def run_analysis_agent(
             "what_user_resists": [],
             "information_gaps": [],
             "phase_readiness": {"enough_for_analysis": True, "enough_for_hypothesis": True, "missing_slots": []},
+            "phase_transition": {
+                "requested": False,
+                "to_phase_id": None,
+                "reason": "",
+                "user_signals": [],
+                "sufficient_understanding": False,
+            },
         }
 
 
@@ -114,12 +144,18 @@ HYPOTHESIS_SCHEMA_HINT = """
 - problem_zones: array of {zone: string, priority: number, evidence: string, pattern_detected: string}
 - hypotheses: array of {id: string, zone: string, expert_role: string, hypothesis: string, confidence: number,
   evidence_from_user: string, evidence_from_methodology: string, content_to_retrieve: string, missing_info: string (опционально)}
+  — поле content_to_retrieve: чаще оставь пустым; только если нужен узкий внутренний поиск по библиотеке эксперта (не веб).
 - response_plan: object с полями:
   - strategy: string
   - key_insight: string
-  - content_needed: array of strings
+  - content_needed: array of strings — в большинстве случаев [] ; максимум одна строка, только если без внутреннего чанка слабо
   - next_action: string
-  - DO_NOT: string (чего генератору нельзя делать: пересказ, банальности, задания если запрещено и т.д.)
+  - DO_NOT: string (чего генератору нельзя делать: пересказ, банальности, частые ссылки на материалы/ref, задания если запрещено и т.д.)
+"""
+
+HYPOTHESIS_INTERNAL_LIBRARY_RULE = """
+ИСТОЧНИКИ: RAG подтягивает только внутреннюю библиотеку контента эксперта. Не планируй опору на внешний веб, статьи и ролики пользователя.
+Чаще обходись без retrieval: content_needed: [] , у гипотез не заполняй content_to_retrieve, если хватает методологии и диалога.
 """
 
 
@@ -134,8 +170,10 @@ async def run_hypothesis_agent(
     stage_timings_ms: dict[str, float],
     user_turn_index: int = 1,
     anti_repeat_block: str = "",
+    phase_gate_hint: str = "",
+    phase_focus_block: str = "",
+    long_memory_block: str = "",
 ) -> dict[str, Any]:
-    t0 = time.perf_counter()
     depth_rules = ""
     if user_turn_index > 1:
         depth_rules = (
@@ -147,12 +185,20 @@ async def run_hypothesis_agent(
         )
     anti = _sanitize_api_text(anti_repeat_block, 4500) if anti_repeat_block else ""
     anti_section = f"\nАНТИ-ПОВТОР (недавние ответы бота — план и DO_NOT должны это учитывать):\n{anti}\n" if anti else ""
+    gate = _sanitize_api_text(phase_gate_hint, 2000) if phase_gate_hint else ""
+    gate_section = f"\nОГРАНИЧЕНИЕ ФАЗЫ (обязательно учти в strategy и DO_NOT):\n{gate}\n" if gate else ""
+    pfocus = _sanitize_api_text(phase_focus_block, 2500) if phase_focus_block else ""
+    focus_section = f"\nФОКУС ЭТАПА (после правил календаря):\n{pfocus}\n" if pfocus else ""
+    lm = _sanitize_api_text(long_memory_block, 3500) if long_memory_block else ""
+    lm_section = f"\nДОЛГАЯ ПАМЯТЬ (не повторяй эти темы/формулировки как будто впервые):\n{lm}\n" if lm else ""
 
     system = (
         "Ты — аналитический модуль, работающий СТРОГО из методологии эксперта ниже. "
         "Не опирайся на общие медицинские клише вне методологии. "
         "Ты НЕ пишешь ответ пользователю — только JSON.\n\n"
-        f"МЕТОДОЛОГИЯ:\n{methodology_framework}\n\n"
+        f"МЕТОДОЛОГИЯ:\n{methodology_framework}\n"
+        + HYPOTHESIS_INTERNAL_LIBRARY_RULE
+        + "\n"
         + HYPOTHESIS_SCHEMA_HINT
         + depth_rules
     )
@@ -160,21 +206,25 @@ async def run_hypothesis_agent(
     user = (
         f"Структурированный анализ сообщения:\n{analysis_s}\n\n"
         f"Профиль пользователя:\n{packed_profile}\n"
+        f"{gate_section}"
+        f"{focus_section}"
+        f"{lm_section}"
         f"{anti_section}"
         "Сформируй problem_zones, hypotheses (1-3), response_plan с явным DO_NOT."
     )
-    resp = await client.chat.completions.create(
+    resp = await chat_completion_json(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.35,
         max_tokens=2000,
-        response_format={"type": "json_object"},
+        temperature=0.35,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key="hypothesis",
     )
-    _add_usage(usage_acc, resp)
-    stage_timings_ms["hypothesis"] = (time.perf_counter() - t0) * 1000
     raw = resp.choices[0].message.content or "{}"
     try:
         return json.loads(raw)
@@ -198,8 +248,10 @@ RERANK_SCHEMA = """
 - relevance: насколько фрагмент про ситуацию пользователя (не просто похожая тема)
 - citation_value: насколько фрагмент даёт новый угол / кейс / формулировку методологии
 
+Цель: чаще всего 0–1 фрагмент в ответ; keep=true только при явной пользе. При сомнении — keep=false.
+
 Верни ТОЛЬКО JSON: {"rankings": [{"index": number, "relevance": number, "citation_value": number, "keep": boolean}]}
-Отбрось keep=false или где min(relevance,citation_value) < 7.
+Отбрось keep=false или где min(relevance,citation_value) < 8.
 """
 
 
@@ -216,9 +268,8 @@ async def run_rerank_chunks(
     stage_timings_ms: dict[str, float],
     max_keep: int = 5,
 ) -> list[dict[str, Any]]:
-    t0 = time.perf_counter()
     if not candidates:
-        stage_timings_ms["rerank"] = (time.perf_counter() - t0) * 1000
+        stage_timings_ms["rerank"] = 0.0
         return []
 
     lines = []
@@ -240,18 +291,19 @@ async def run_rerank_chunks(
         f"Краткий анализ: {an}\n\n"
         "Фрагменты:\n" + "\n\n".join(lines)
     )
-    resp = await client.chat.completions.create(
+    resp = await chat_completion_json(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.1,
         max_tokens=1200,
-        response_format={"type": "json_object"},
+        temperature=0.1,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key="rerank",
     )
-    _add_usage(usage_acc, resp)
-    stage_timings_ms["rerank"] = (time.perf_counter() - t0) * 1000
     raw = resp.choices[0].message.content or '{"rankings":[]}'
     try:
         data = json.loads(raw)
@@ -266,13 +318,13 @@ async def run_rerank_chunks(
             rel = float(r.get("relevance", 0))
             cit = float(r.get("citation_value", 0))
             keep = r.get("keep", True)
-            if keep and min(rel, cit) >= 7 and 0 <= idx < len(candidates):
+            if keep and min(rel, cit) >= 8 and 0 <= idx < len(candidates):
                 keep_indices.add(idx)
         except (TypeError, ValueError):
             continue
 
     if not keep_indices:
-        keep_indices = set(range(min(max_keep, len(candidates))))
+        return []
 
     ordered = sorted(keep_indices)[:max_keep]
     return [candidates[i] for i in ordered if i < len(candidates)]
@@ -322,8 +374,8 @@ async def run_generation_agent(
     stage_timings_ms: dict[str, float],
     user_turn_index: int = 1,
     anti_repeat_block: str = "",
+    exploration_mode_note: str = "",
 ) -> str:
-    t0 = time.perf_counter()
     fs = f"\n\nПРИМЕРЫ ТОНА (few-shot):\n{few_shot_dialogues}\n" if few_shot_dialogues.strip() else ""
     arc = ""
     if user_turn_index > 1:
@@ -336,6 +388,8 @@ async def run_generation_agent(
         )
     anti = _sanitize_api_text(anti_repeat_block, 4500) if anti_repeat_block else ""
     anti_user = f"\n\nАНТИ-ШАБЛОН:\n{anti}\n" if anti else ""
+    exp = _sanitize_api_text(exploration_mode_note, 2200) if exploration_mode_note else ""
+    exp_user = f"\n\nРЕЖИМ ПЕРВОЙ ФАЗЫ (сбор данных):\n{exp}\n" if exp else ""
 
     system = (
         tone_of_voice
@@ -354,28 +408,37 @@ async def run_generation_agent(
     cb = _sanitize_api_text(content_block, 12000)
     um = _sanitize_api_text(user_message, 6000)
     disc = _sanitize_api_text(disclaimer, 2000)
+    sources_policy = (
+        "ПОЛИТИКА ИСТОЧНИКОВ: блок «КОНТЕКСТ» ниже — только внутренняя библиотека проекта (чанки базы). "
+        "Не опирайся на ссылки, статьи и видео из интернета, которые пользователь мог вставить в сообщение — это не твоя база знаний. "
+        "В большинстве ответов не упоминай материалы и не пиши ref:... — говори своими словами; один ref только в редком случае, если явно усиливает одну мысль.\n\n"
+    )
     user = (
         f"ПЛАН ОТВЕТА:\n{plan_s}\n\n"
         f"Пользователь УЖЕ ЗНАЕТ (не повторять как открытие):\n{wuk_s}\n\n"
         f"ЗАПРЕЩЕНО в этом ответе:\n{do_s}\n\n"
-        f"КОНТЕКСТ ДЛЯ ОПОРЫ (не пересказывать дословно):\n{cb or '(нет подобранных фрагментов — опирайся на методологию и план)'}\n\n"
+        f"{sources_policy}"
+        f"КОНТЕКСТ ДЛЯ ОПОРЫ (внутренняя библиотека; не пересказывать дословно):\n{cb or '(нет подобранных фрагментов — опирайся на методологию и план, без выдуманных ссылок)'}\n\n"
         f"Сообщение пользователя:\n{um}\n"
+        f"{exp_user}"
         f"{anti_user}"
         f"{disc}\n\n"
         "Ответь одним связным сообщением. Если в плане указано задать один уточняющий вопрос — один в конце. "
         "Если в плане сказано не давать задание — не давай."
     )
-    resp = await client.chat.completions.create(
+    resp = await chat_completion_text(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.35,
         max_tokens=1200,
+        temperature=0.35,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key="generation",
     )
-    _add_usage(usage_acc, resp)
-    stage_timings_ms["generation"] = (time.perf_counter() - t0) * 1000
     return (resp.choices[0].message.content or "").strip()
 
 
@@ -386,10 +449,14 @@ structural_freshness (высокий балл = ответ НЕ копирует
 
 Для captain_obvious: высокий балл = мало банальностей и нет набора «универсального коучинга» (дыхание, пять чувств, дневник) без явной нужды.
 
+Для citation_quality: высокий балл, если ответ не злоупотребляет ссылками/ref и материалами — чаще достаточно голоса автора без цитирования библиотеки.
+Если фрагменты контекста не передавались генератору (нет опоры на чанки) — в ответе не должно быть выдуманных ref и «посмотрите материал»; иначе низкий балл.
+Если фрагменты были, но ответ перегружен отсылками к материалам там, где хватило бы речи — снижай citation_quality.
+
 Если в запросе секция «Недавние ответы ассистента» пустая или (первый ответ) — ставь structural_freshness = 10 и не используй его как причину провала.
 
 Пороги провала: anti_parroting < 7 ИЛИ information_gain < 6 ИЛИ persona_fidelity < 6 ИЛИ methodology_presence < 5
-ИЛИ citation_quality < 5 (если в плане предполагалась опора на контент и контент был)
+ИЛИ citation_quality < 5 (если по критерию citation_quality выше ответ завален: без чанков — выдуманные ref/«смотрите материал»; с чанками — слабая опора при явной нужде; или лишние отсылки к материалам)
 ИЛИ actionability < 5 ИЛИ captain_obvious < 6
 ИЛИ structural_freshness < 6 (только если были недавние ответы ассистента в контексте)
 
@@ -415,7 +482,6 @@ async def run_quality_judge(
     stage_timings_ms: dict[str, float],
     anti_repeat_block: str = "",
 ) -> dict[str, Any]:
-    t0 = time.perf_counter()
     system = (
         "Ты — модуль контроля качества ответов. Ты НЕ генерируешь ответ пользователю.\n" + JUDGE_SCHEMA
     )
@@ -437,30 +503,21 @@ async def run_quality_judge(
         f"DO_NOT:\n{do_s}\n\n"
         f"План:\n{plan_s}\n\n"
         f"{recent_section}"
-        f"В плане предполагалась опора на контент из базы: {had_content}\n"
+        f"Перед генератору передавались фрагменты внутренней библиотеки (чанки): {had_content}\n"
     )
-    kwargs = dict(
+    resp = await chat_completion_json(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.1,
         max_tokens=1000,
+        temperature=0.1,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key="judge",
     )
-    try:
-        resp = await client.chat.completions.create(
-            **kwargs,
-            response_format={"type": "json_object"},
-        )
-    except APIStatusError as e:
-        if getattr(e, "status_code", None) == 400:
-            logger.warning("quality_judge_json_mode_retry", detail=str(e)[:400])
-            resp = await client.chat.completions.create(**kwargs)
-        else:
-            raise
-    _add_usage(usage_acc, resp)
-    stage_timings_ms["judge"] = (time.perf_counter() - t0) * 1000
     raw = resp.choices[0].message.content or "{}"
     try:
         return json.loads(raw)
@@ -480,11 +537,11 @@ async def run_rewrite(
     stage_timings_ms: dict[str, float],
     tag: str = "rewrite",
 ) -> str:
-    t0 = time.perf_counter()
     d = _sanitize_api_text(draft, 8000)
     ri = _sanitize_api_text(rewrite_instructions, 4000)
     um = _sanitize_api_text(user_message, 6000)
-    resp = await client.chat.completions.create(
+    resp = await chat_completion_text(
+        client,
         model=model,
         messages=[
             {"role": "system", "content": tone_of_voice + "\n\nПерепиши ответ по инструкции. Один связный текст."},
@@ -493,9 +550,10 @@ async def run_rewrite(
                 "content": f"Инструкция правки:\n{ri}\n\nЧерновик:\n{d}\n\nИсходный вопрос пользователя:\n{um}",
             },
         ],
-        temperature=0.3,
         max_tokens=1200,
+        temperature=0.3,
+        usage_acc=usage_acc,
+        stage_timings_ms=stage_timings_ms,
+        timing_key=tag,
     )
-    _add_usage(usage_acc, resp)
-    stage_timings_ms[tag] = (time.perf_counter() - t0) * 1000
     return (resp.choices[0].message.content or d).strip()

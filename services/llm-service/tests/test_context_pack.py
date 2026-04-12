@@ -5,6 +5,7 @@ def test_pack_context_empty():
     p = pack_context(None, None)
     assert "working_memory_text" in p
     assert "profile_text" in p
+    assert "long_memory_text" in p
     assert p["dialogue_phase"] == "free_chat"
 
 
